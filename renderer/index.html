@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: easyimg: https://cdn.modrinth.com https://media.forgecdn.net https://launchercontent.mojang.com; connect-src 'none'; font-src 'self' data:">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>easyLauncher</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<!-- живой фон тем (стекло, аврора, неон, закат); в минималистичной теме скрыт -->
+<div class="backdrop" aria-hidden="true"><i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><i class="blob b4"></i><div class="stars"></div><div class="grid-floor"></div><div class="dimmer"></div></div>
+<div class="shell">
+  <header class="titlebar">
+    <span class="titlebar-name">easyLauncher</span>
+    <div class="window-buttons">
+      <button data-window="minimize" aria-label="Свернуть" data-icon="minimize"></button>
+      <button data-window="maximize" aria-label="Развернуть" data-icon="maximize"></button>
+      <button data-window="close" aria-label="Закрыть" data-icon="close"></button>
+    </div>
+  </header>
+
+  <nav class="sidebar" aria-label="Разделы">
+    <div class="brand"><i data-icon="logo"></i><span>easy<b>Launcher</b></span></div>
+    <button class="nav-item" data-view="play"><i data-icon="home"></i><span>Играть</span></button>
+    <button class="nav-item" data-view="builds"><i data-icon="cube"></i><span>Сборки</span></button>
+    <button class="nav-item" data-view="mods"><i data-icon="mods"></i><span>Моды</span></button>
+    <button class="nav-item" data-view="worlds"><i data-icon="globe"></i><span>Миры</span></button>
+    <button class="nav-item" data-view="friends"><i data-icon="users"></i><span>С друзьями</span><em class="nav-badge" id="friends-badge" hidden>идёт</em></button>
+    <button class="nav-item" data-view="settings"><i data-icon="settings"></i><span>Настройки</span></button>
+    <div class="sidebar-bottom">
+      <div class="side-progress" id="side-progress" hidden></div>
+      <button class="nav-item assistant-toggle" id="assistant-toggle" aria-expanded="false"><i data-icon="assistant"></i><span>Помощник</span></button>
+      <button class="account-chip" id="account-chip"><span class="account-avatar" data-icon="avatar"></span><span class="account-text"><b id="account-name">Игрок</b><small id="account-kind">Вход не выполнен</small></span></button>
+    </div>
+  </nav>
+
+  <main class="main" id="main" tabindex="-1"></main>
+
+  <aside class="assistant-panel" id="assistant-panel" hidden aria-label="Помощник">
+    <div class="assistant-head"><h2>Помощник</h2><button class="icon-button" id="assistant-close" aria-label="Закрыть помощника" data-icon="close"></button></div>
+    <p class="assistant-note" id="assistant-note"></p>
+    <div class="assistant-feed" id="assistant-feed" aria-live="polite"></div>
+    <div class="assistant-suggest" id="assistant-suggest">
+      <button data-suggestion="У меня слабый ноутбук, помоги с настройками">Повыше FPS</button>
+      <button data-suggestion="Собери уютное выживание с фермами, без магии">Подобрать моды</button>
+      <button id="assistant-log">Разобрать ошибку из файла</button>
+    </div>
+    <form class="assistant-form" id="assistant-form">
+      <label class="sr-only" for="assistant-input">Вопрос, пожелание или текст ошибки</label>
+      <textarea id="assistant-input" rows="2" maxlength="1000000" placeholder="Например: добавь Create или вставь текст ошибки"></textarea>
+      <button class="icon-button send" type="submit" aria-label="Отправить" data-icon="send"></button>
+    </form>
+  </aside>
+</div>
+
+<div class="overlay" id="overlay" hidden><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title"><div class="dialog-top"><h2 id="dialog-title"></h2><button class="icon-button" id="dialog-close" aria-label="Закрыть" data-icon="close"></button></div><div class="dialog-body" id="dialog-body"></div></section></div>
+<div class="toast" id="toast" role="status" hidden></div>
+<input type="file" id="file-input" accept=".log,.txt" hidden>
+<script src="icons.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

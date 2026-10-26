@@ -1,0 +1,91 @@
+{
+  "name": "easylauncher",
+  "productName": "easyLauncher",
+  "version": "3.4.0",
+  "description": "Лаунчер Minecraft Java Edition: сборки, каталог модов Modrinth/CurseForge, миры, игра с друзьями, локальный помощник",
+  "main": "main.js",
+  "author": "easyLauncher",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test --test-concurrency=1 --test-timeout=60000 test/*.test.js",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux",
+    "test:electron": "electron test/electron/webrtc-e2e.js",
+    "server": "node server/index.js",
+    "configure": "node tools/configure.js"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "electron": "^44.9.3",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "app.easylauncher.desktop",
+    "productName": "easyLauncher",
+    "files": [
+      "main.js",
+      "preload.js",
+      "core/**",
+      "renderer/**",
+      "build/icon.png",
+      "package.json",
+      "!renderer/assets/*.md",
+      "!**/*.map"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.games",
+      "icon": "build/icon.png"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Game",
+      "icon": "build/icon.png"
+    },
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "publish": null,
+    "electronLanguages": [
+      "ru",
+      "en-US"
+    ],
+    "compression": "maximum",
+    "asar": true,
+    "protocols": [
+      {
+        "name": "easyLauncher invite",
+        "schemes": [
+          "easylauncher"
+        ]
+      }
+    ]
+  },
+  "easylauncher": {
+    "backend": "",
+    "cfProxy": "https://easylauncher-curseforge.gamovartem76.workers.dev",
+    "msClientId": "fab588dc-1a55-4398-a560-743f823b74d5"
+  }
+}

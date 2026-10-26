@@ -1,0 +1,46 @@
+'use strict';
+// Иконки интерфейса (линейные SVG 24×24). Иллюстраций, выдаваемых за игровые кадры, здесь нет.
+const paths = {
+  logo: '<path d="M12 2 22 7.5v9L12 22 2 16.5v-9Z" fill="#b9ce92" stroke="none"/><path d="m12 2 10 5.5L12 13 2 7.5Z" fill="#e0e8c4" stroke="none"/><path d="M12 13v9l10-5.5v-9Z" fill="#8da56a" stroke="none"/><path d="m13 5-6 8h4l-1 6 7-9h-4l2-5Z" fill="#283820" stroke="none"/>',
+  play: '<path d="m8 5 11 7-11 7Z" fill="currentColor"/>',
+  home: '<path d="m3 11 9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1Z"/>',
+  cube: '<path d="m12 2 9 5v10l-9 5-9-5V7Z M3 7l9 5 9-5 M12 12v10"/>',
+  mods: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M14 6.5h7 M17.5 3v7"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18 M12 3c3 3 3 15 0 18 M12 3c-3 3-3 15 0 18"/>',
+  users: '<circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3 M16 5a3 3 0 0 1 0 6 M18 21v-3a6 6 0 0 0-2-4"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/>',
+  assistant: '<path d="M12 3v3 M12 18v3 M3 12h3 M18 12h3 M6 6l2 2 M16 16l2 2 M18 6l-2 2 M8 16l-2 2"/><circle cx="12" cy="12" r="3"/>',
+  avatar: '<circle cx="12" cy="8" r="4"/><path d="M4 21v-1a8 8 0 0 1 16 0v1"/>',
+  minimize: '<path d="M5 12h14"/>',
+  maximize: '<rect x="5" y="5" width="14" height="14" rx="1"/>',
+  close: '<path d="m6 6 12 12 M18 6 6 18"/>',
+  chevron: '<path d="m7 10 5 5 5-5"/>',
+  back: '<path d="M19 12H5 M11 6l-6 6 6 6"/>',
+  arrow: '<path d="M5 12h14 M13 6l6 6-6 6"/>',
+  plus: '<path d="M12 5v14 M5 12h14"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
+  trash: '<path d="M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13"/>',
+  refresh: '<path d="M20 11a8 8 0 1 0-2 6 M20 4v7h-7"/>',
+  pin: '<path d="M9 3h6l-1 6 4 4H6l4-4Z M12 13v8"/>',
+  image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 17-5-5-9 8"/>',
+  folder: '<path d="M3 7V5h6l2 2h10v12H3z"/>',
+  link: '<path d="M10 14a4 4 0 0 0 6 0l3-3a4 4 0 0 0-6-6l-1 1 M14 10a4 4 0 0 0-6 0l-3 3a4 4 0 0 0 6 6l1-1"/>',
+  external: '<path d="M14 4h6v6 M20 4l-9 9 M18 14v6H4V6h6"/>',
+  check: '<path d="m5 12 4 4L19 6"/>',
+  download: '<path d="M12 3v12 M7 10l5 5 5-5 M4 17v4h16v-4"/>',
+  upload: '<path d="M12 21V9 M7 14l5-5 5 5 M4 7V3h16v4"/>',
+  history: '<path d="M3 11a9 9 0 1 1 2 7M3 4v7h7M12 7v5l3 2"/>',
+  more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
+  lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6 M12 7v.1"/>',
+  warning: '<path d="M12 3 2 20h20Z M12 10v4 M12 17v.1"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
+  server: '<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01 M7 17.5h.01"/>',
+  chip: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4m6-4v4M9 18v4m6-4v4M2 9h4m-4 6h4m12-6h4m-4 6h4"/>',
+  attach: '<path d="m8 12 6-6a3 3 0 0 1 4 4l-8 8a5 5 0 0 1-7-7l8-8"/>',
+  send: '<path d="M4 12 20 4l-6 16-3-7Z"/>',
+};
+
+function icon(n) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[n] || paths.cube}</svg>`;
+}

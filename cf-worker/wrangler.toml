@@ -1,0 +1,4 @@
+name = "easylauncher-curseforge"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+# Ключ задаётся секретом, не здесь:  npx wrangler secret put CF_API_KEY

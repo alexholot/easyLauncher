@@ -234,7 +234,26 @@ class Mojang {
     const nativesDir = path.join(this.versionsDir, version.id, 'natives');
     if (plan.natives.length) await this.extractNatives(plan.natives, nativesDir);
     else await fsp.mkdir(nativesDir, { recursive: true });
-    return { classpath: [...plan.classpath, jar], nativesDir, logging };
+    return { classpath: [...plan.classpath, await this.classpathJar(version)], nativesDir, logging };
+  }
+
+  /**
+   * client.jar для classpath. Forge и NeoForge (1.17+) исключают игру из модулей по имени
+   * `${version_name}.jar` (-DignoreList): как и лаунчер Mojang, кладём копию игры под именем версии
+   * загрузчика. Иначе в игре два модуля Minecraft и запуск падает: «Modules _1._20._1 and minecraft
+   * export package net.minecraft.server». Fabric и Quilt берут игру как есть.
+   */
+  async classpathJar(version) {
+    const jar = this.clientJar(version);
+    if (!version.jar || version.jar === version.id || !JSON.stringify(version.arguments?.jvm || []).includes('${version_name}.jar')) return jar;
+    const own = path.join(this.versionsDir, version.id, version.id + '.jar');
+    const size = (f) => fsp.stat(f).then((s) => s.size, () => -1);
+    if ((await size(own)) !== (await size(jar))) {
+      await fsp.mkdir(path.dirname(own), { recursive: true });
+      await fsp.copyFile(jar, own + '.part');
+      await http.retryFs(() => fsp.rename(own + '.part', own), path.basename(own));
+    }
+    return own;
   }
 
   async extractNatives(list, dir) {
@@ -405,12 +424,16 @@ function buildClientArgs(version, opts, env) {
     quickPlayMultiplayer: opts.server || '',
     quickPlaySingleplayer: opts.world || '',
     quickPlayPath: '',
+    resolution_width: String(opts.window?.width || ''),
+    resolution_height: String(opts.window?.height || ''),
   };
   const gameArgsText = JSON.stringify(version.arguments?.game || []);
   const supportsQuickPlay = gameArgsText.includes('quickPlayMultiplayer');
   const features = {
     is_quick_play_multiplayer: !!opts.server && supportsQuickPlay,
     is_quick_play_singleplayer: !opts.server && !!opts.world && gameArgsText.includes('quickPlaySingleplayer'),
+    // размер окна игры из настроек лаунчера
+    has_custom_resolution: !!(opts.window?.width && opts.window?.height),
   };
   const jvm = [
     `-Xmx${opts.ram}G`,
@@ -442,6 +465,7 @@ function buildClientArgs(version, opts, env) {
     );
     if ((env?.os || osName()) === 'osx') jvm.push('-XstartOnFirstThread');
     game = substitute(version.minecraftArguments || '', vars).split(' ').filter(Boolean);
+    if (features.has_custom_resolution) game.push('--width', vars.resolution_width, '--height', vars.resolution_height);
   }
   if (opts.logging) jvm.push(opts.logging);
   if (opts.server && !supportsQuickPlay) {

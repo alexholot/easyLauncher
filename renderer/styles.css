@@ -672,3 +672,10 @@ select option { background-color: var(--menu-bg); color: var(--menu-text); }
 select optgroup { background-color: var(--menu-bg); color: var(--menu-group); font-weight: 600; }
 select.input { color-scheme: dark; }
 :root[data-theme="light"] select.input { color-scheme: light; }
+
+/* уточняющие вопросы помощника: вопрос строкой, варианты под ним (панель узкая) */
+.clarify-q { margin: 12px 0 0; }
+.clarify-q b { display: block; font-size: 13.5px; }
+.clarify-q small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.clarify-q .segmented { margin-top: 6px; }
+.clarify-q .segmented button { padding: 5px 10px; font-size: 13px; }

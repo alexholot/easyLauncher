@@ -17,7 +17,7 @@ const on = (channel) => (fn) => {
 const channels = [
   'win:minimize', 'win:maximize', 'win:close', 'sys:info',
   'auth:status', 'auth:logout', 'auth:login',
-  'settings:get', 'settings:set', 'bg:set', 'bg:for',
+  'settings:get', 'settings:set', 'storage:info', 'storage:clean', 'java:pick','bg:set', 'bg:for',
   'home:info', 'home:updates', 'home:news', 'home:newsBody', 'bg:shot', 'profiles:overview', 'profiles:first', 'profiles:select', 'profiles:details', 'profiles:create', 'profiles:update', 'profiles:delete',
   'profiles:screenshots', 'profiles:export', 'profiles:import', 'profiles:coverPick', 'profiles:coverShot', 'profiles:coverClear',
   'worlds:list', 'worlds:coverPick', 'worlds:coverShot', 'worlds:coverPin', 'worlds:coverClear',
@@ -27,7 +27,7 @@ const channels = [
   'mods:install', 'mods:plan', 'mods:apply', 'mods:cancel', 'mods:rollback', 'mods:pin', 'mods:enable', 'mods:pickFile',
   'coop:start', 'coop:end', 'room:open', 'room:invite', 'room:invites', 'room:revoke',
   'guest:open', 'guest:prepare', 'guest:connect', 'guest:leave',
-  'ai:status', 'ai:plan', 'ai:install', 'ai:uninstall', 'ai:unload', 'ai:ask',
+  'ai:status', 'ai:plan', 'ai:install', 'ai:uninstall', 'ai:unload', 'ai:ask', 'ai:run',
   'open:folder', 'open:external', 'clipboard:write',
 ];
 const api = {};

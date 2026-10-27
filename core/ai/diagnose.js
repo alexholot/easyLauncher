@@ -36,6 +36,7 @@ const RULES = [
     level: 'error',
     title: 'Не хватает зависимости мода',
     fix: (m) => `«${m[1]}» требует «${m[3].trim()}». Открой «Сборка» — лаунчер предложит недостающий мод из каталога.`,
+    data: (m) => ({ mod: m[1], depName: m[3].trim(), depId: m[4] || null }),
   },
   {
     id: 'missing-dep-generic',
@@ -43,6 +44,7 @@ const RULES = [
     level: 'error',
     title: 'Не хватает зависимости мода',
     fix: (m) => `Не найден мод «${m[1]}». Добавь его через «Сборка».`,
+    data: (m) => ({ depName: m[1], depId: m[1] }),
   },
   {
     id: 'incompatible',
@@ -50,6 +52,7 @@ const RULES = [
     level: 'error',
     title: 'Несовместимые моды',
     fix: (m) => (m[1] ? `«${m[1]}» несовместим с «${m[2]}». Убери один из них.` : 'В сборке есть моды, которые авторы объявили несовместимыми. Открой «Сборка» и проверь предупреждения.'),
+    data: (m) => ({ a: m[1] || null, b: m[2] || null }),
   },
   {
     id: 'wrong-mc',
@@ -64,6 +67,7 @@ const RULES = [
     level: 'error',
     title: 'Конфликт внедрений (Mixin)',
     fix: (m) => (m[1] ? `Мод «${m[1]}» не смог встроиться в игру — обычно это несовместимость версий. Попробуй обновить или убрать его.` : 'Один из модов не смог встроиться в игру. Обычно помогает обновление или удаление последнего добавленного мода.'),
+    data: (m) => ({ modId: m[1] || null }),
   },
   {
     id: 'gl-driver',
@@ -101,7 +105,8 @@ function diagnose(text) {
   const out = [];
   for (const r of RULES) {
     const m = clean.match(r.re);
-    if (m) out.push({ id: r.id, level: r.level, title: r.title, fix: r.fix(m), evidence: m[0].slice(0, 300) });
+    // data — разобранные имена модов для автоматической починки (помощник проверяет их по каталогу и сборке)
+    if (m) out.push({ id: r.id, level: r.level, title: r.title, fix: r.fix(m), evidence: m[0].slice(0, 300), data: r.data ? r.data(m) : null });
   }
   return out;
 }

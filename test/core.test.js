@@ -88,6 +88,22 @@ test('склейка Fabric с Minecraft и план библиотек', () => 
   assert.equal(m.clientJar(merged), path.join('/root/shared', 'versions', '1.21.1', '1.21.1.jar'));
 });
 
+test('Forge/NeoForge: игра в classpath под именем версии загрузчика (как в лаунчере Mojang)', async () => {
+  // настоящий запуск Forge 1.20.1 падал: ignoreList исключает `${version_name}.jar`, а в classpath был 1.20.1.jar
+  const shared = tmp();
+  const m = new Mojang(shared);
+  fs.mkdirSync(path.join(shared, 'versions', '1.20.1'), { recursive: true });
+  fs.writeFileSync(path.join(shared, 'versions', '1.20.1', '1.20.1.jar'), 'vanilla-client');
+  const forge = { id: '1.20.1-forge-47.4.28', jar: '1.20.1', arguments: { jvm: ['-DignoreList=bootstraplauncher,forge-,${version_name}.jar'] } };
+  const own = await m.classpathJar(forge);
+  assert.equal(own, path.join(shared, 'versions', forge.id, forge.id + '.jar'));
+  assert.equal(fs.readFileSync(own, 'utf8'), 'vanilla-client');
+  assert.equal(await m.classpathJar(forge), own, 'повторный запуск — без новой копии');
+  // Fabric не исключает игру по имени — берётся сам client.jar
+  const fabricMerged = { id: 'fabric-loader-0.16.9-1.20.1', jar: '1.20.1', arguments: { jvm: [] } };
+  assert.equal(await m.classpathJar(fabricMerged), path.join(shared, 'versions', '1.20.1', '1.20.1.jar'));
+});
+
 test('аргументы клиента: офлайн-профиль и быстрый вход на сервер', () => {
   const args = buildClientArgs(
     mergeVersion(fabricProfile, vanilla),

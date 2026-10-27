@@ -1,7 +1,7 @@
 {
   "name": "easylauncher",
   "productName": "easyLauncher",
-  "version": "3.4.0",
+  "version": "3.6.1",
   "description": "Лаунчер Minecraft Java Edition: сборки, каталог модов Modrinth/CurseForge, миры, игра с друзьями, локальный помощник",
   "main": "main.js",
   "author": "easyLauncher",
@@ -42,11 +42,26 @@
       "target": [
         "nsis"
       ],
-      "icon": "build/icon.png"
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "installerSidebar": "build/installerSidebar.bmp",
+      "uninstallerSidebar": "build/installerSidebar.bmp",
+      "installerHeader": "build/installerHeader.bmp",
+      "installerLanguages": [
+        "ru_RU"
+      ],
+      "language": "1049",
+      "shortcutName": "easyLauncher",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false
     },
     "mac": {
       "target": [

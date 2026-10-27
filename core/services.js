@@ -17,12 +17,14 @@ const http = require('./http');
 const { ModrinthProvider } = require('./catalog/modrinth');
 const { CurseForgeProvider } = require('./catalog/curseforge');
 const lockLib = require('./lock');
-const { readJson, writeJson } = require('./store');
+const { readJson, writeJson, emptyLock } = require('./store');
 const { HostSession, GuestSession, parseInvite } = require('./net/session');
 const { RelayHost, RelayGuest } = require('./net/relay');
 const { AiManager } = require('./ai/manager');
-const { Assistant, proposeMods, smallTalk } = require('./ai/assistant');
+const { Assistant, smallTalk } = require('./ai/assistant');
 const { diagnose: diagnoseRules } = require('./ai/diagnose');
+const builder = require('./ai/builder');
+const { checkLinks } = require('./modlinks');
 const { DEFAULTS } = require('./defaults');
 
 const GiB = 1024 ** 3;
@@ -75,6 +77,60 @@ function parseNews(data) {
     .slice(0, 12);
 }
 
+function plural(n, a, b, c) {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  return m10 === 1 && m100 !== 11 ? a : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? b : c;
+}
+
+/** Шаг задания помощника для игрока — по изменению плана. */
+function stepOf(c) {
+  return `${c.type === 'add' ? 'Добавить' : c.type === 'update' ? 'Обновить' : 'Убрать'} ${c.name}${c.dependencyOf ? ` (нужен для ${c.dependencyOf})` : ''}`;
+}
+
+/**
+ * Ответы игрока на уточняющие вопросы (приходят из окна — берём только известные поля и значения).
+ * null — вопросов ещё не задавали; {} — ответил «по умолчанию».
+ */
+function cleanAnswers(a) {
+  if (!a || typeof a !== 'object') return null;
+  const out = {};
+  if (['small', 'normal', 'big'].includes(a.size)) out.size = a.size;
+  if (a.version === 'auto' || /^[0-9][0-9a-z.-]{0,15}$/i.test(a.version || '')) out.version = a.version;
+  if (['auto', 'fabric', 'forge', 'neoforge', 'quilt'].includes(a.loader)) out.loader = a.loader;
+  if (['few', 'more'].includes(a.amount)) out.amount = a.amount;
+  if (['new', 'current'].includes(a.where)) out.where = a.where;
+  for (const k of ['perf', 'qol', 'visuals', 'setup']) if (typeof a[k] === 'boolean') out[k] = a[k];
+  return out;
+}
+
+/** Уточняющие вопросы перед добавлением модов по теме в текущую сборку. */
+function addQuestions(intent) {
+  const yes = (v) => [
+    { value: true, label: 'Да', selected: v },
+    { value: false, label: 'Нет', selected: !v },
+  ];
+  return [
+    { id: 'amount', title: 'Сколько модов добавить', hint: '', options: [{ value: 'few', label: 'Немного (до 8)', selected: !intent.big }, { value: 'more', label: 'Побольше (до 20)', selected: !!intent.big }] },
+    { id: 'perf', title: 'Заодно поставить моды оптимизации', hint: 'Больше FPS, игра не меняется', options: yes(!!intent.lowEnd) },
+    { id: 'setup', title: 'Поднять память игре, если модов станет много', hint: '', options: yes(true) },
+  ];
+}
+
+/** Мод, который проверка убрала из подборки: «JEI (заменён на EMI)». */
+function droppedText(d) {
+  return d.replacedBy ? `${d.name} (заменён на ${d.replacedBy})` : d.name;
+}
+
+/** Раздел подборки по причине выбора мода: «Ты просил», «Оптимизация», «Зомби»… */
+function groupTitle(reason) {
+  const [kind, theme] = String(reason).split(':');
+  if (kind === 'term') return 'Ты просил';
+  if (kind === 'ai') return 'Посоветовала нейросеть';
+  if (kind === 'base') return theme === 'qol' ? 'Удобства' : 'Оптимизация';
+  return builder.THEME_RU[theme] || 'Другое';
+}
+
 function inside(dir, file) {
   const rel = path.relative(path.resolve(dir), path.resolve(file));
   return rel && !rel.startsWith('..') && !path.isAbsolute(rel);
@@ -96,6 +152,7 @@ class Services extends EventEmitter {
     this.rtc = opts.rtc || null;
     this.opts = opts;
     this.plans = new Map(); // planId → {pid, plan}
+    this.tasks = new Map(); // taskId → задание помощника, которое игрок подтверждает одной кнопкой
     this.modsAbort = null;
     this.host = null; // HostSession
     this.guest = null; // {session, profileId, manifest, room}
@@ -170,13 +227,23 @@ class Services extends EventEmitter {
       options: s.options || null,
       // фон главного экрана: стандартный / своя картинка / скриншот выбранной сборки
       background: BG_MODES.includes(s.background?.mode) ? s.background : { mode: 'default' },
-      dim: Number.isFinite(s.dim) ? Math.max(0.2, Math.min(0.9, s.dim)) : 0.55,
+      // затемнение фона больше не настраивается (ползунок убран) — постоянное значение для читаемости
+      dim: 0.55,
+      // окно игры: размер или полный экран; null — как решит сама игра
+      window: s.window || null,
+      // свои аргументы Java и своя Java (для опытных игроков); пусто — лаунчер подбирает сам
+      jvmArgs: s.jvmArgs || '',
+      javaPath: s.javaPath || '',
+      // что делать с лаунчером, когда игра запущена: оставить, свернуть или спрятать до закрытия игры
+      afterLaunch: ['keep', 'minimize', 'hide'].includes(s.afterLaunch) ? s.afterLaunch : 'keep',
+      showNews: s.showNews !== false,
+      checkUpdates: s.checkUpdates !== false,
     };
   }
   async saveSettings(patch) {
     const cur = (await readJson(this.settingsFile)) || {};
     // только известные поля: настройки не превращаются в склад произвольных данных из интерфейса
-    const KNOWN = ['backend', 'cfProxy', 'ram', 'serverRam', 'eula', 'motion', 'lastProfile', 'nickname', 'options', 'offlineOk', 'dim', 'appearance', 'background'];
+    const KNOWN = ['backend', 'cfProxy', 'ram', 'serverRam', 'eula', 'motion', 'lastProfile', 'nickname', 'options', 'offlineOk', 'dim', 'appearance', 'background', 'window', 'jvmArgs', 'javaPath', 'afterLaunch', 'showNews', 'checkUpdates'];
     for (const k of Object.keys(patch)) if (!KNOWN.includes(k)) throw new Error('Неизвестная настройка: ' + k);
     const next = { ...cur, ...patch };
     if (patch.eula !== undefined) next.eula = patch.eula === true;
@@ -210,6 +277,26 @@ class Services extends EventEmitter {
       if (!Number.isInteger(n) || n < 1 || n > max) throw new Error(`Память: целое число от 1 до ${max} ГБ.`);
       next[f] = n;
     }
+    if (patch.window !== undefined) {
+      const w = patch.window;
+      const int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi ? v : null);
+      next.window = w ? { width: int(w.width, 640, 7680), height: int(w.height, 480, 4320), fullscreen: w.fullscreen === true } : null;
+    }
+    if (patch.jvmArgs !== undefined) {
+      const a = String(patch.jvmArgs || '').trim();
+      // только флаги JVM: без переводов строк, команд и путей к другим программам; память задаётся отдельно
+      if (a.length > 600 || /[\r\n`$;&|<>]/.test(a)) throw new Error('Аргументы Java: одна строка до 600 символов, без спецсимволов.');
+      if (a && a.split(/\s+/).some((x) => !/^-/.test(x))) throw new Error('Аргументы Java начинаются с «-», например -XX:+UseZGC.');
+      if (/(^|\s)-Xm[xs]/.test(a)) throw new Error('Память задаётся полем «Память для игры», а не аргументами -Xmx/-Xms.');
+      next.jvmArgs = a;
+    }
+    if (patch.javaPath !== undefined) {
+      const j = String(patch.javaPath || '').trim();
+      if (j && (!/(^|[\\/])javaw?(\.exe)?$/i.test(j) || !fs.existsSync(j))) throw new Error('Укажи файл java.exe (или javaw.exe) из папки bin установленной Java.');
+      next.javaPath = j;
+    }
+    if (patch.afterLaunch !== undefined && !['keep', 'minimize', 'hide'].includes(patch.afterLaunch)) throw new Error('Неизвестное поведение лаунчера.');
+    for (const k of ['showNews', 'checkUpdates']) if (patch[k] !== undefined) next[k] = patch[k] !== false;
     if (patch.appearance !== undefined) next.appearance = normalizeAppearance({ ...normalizeAppearance(cur.appearance), ...patch.appearance });
     if (patch.nickname !== undefined && !/^[A-Za-z0-9_]{3,16}$/.test(patch.nickname)) throw new Error('Никнейм: 3–16 символов, латиница, цифры и _.');
     await writeJson(this.settingsFile, next);
@@ -488,6 +575,39 @@ class Services extends EventEmitter {
     return bytes;
   }
 
+  /** Место на диске: общий кэш модов и файлы игры (версии, библиотеки, ресурсы, Java). */
+  async storageInfo() {
+    const shared = path.join(this.root, 'shared');
+    const size = async (dir) => {
+      let bytes = 0;
+      const walk = async (d, depth) => {
+        for (const e of await fsp.readdir(d, { withFileTypes: true }).catch(() => [])) {
+          const f = path.join(d, e.name);
+          if (e.isDirectory()) {
+            if (depth < 14) await walk(f, depth + 1);
+          } else if (e.isFile()) bytes += (await fsp.stat(f).catch(() => ({ size: 0 }))).size;
+        }
+      };
+      await walk(dir, 0);
+      return bytes;
+    };
+    const game = (await Promise.all(['versions', 'libraries', 'assets', 'runtime'].map((d) => size(path.join(shared, d))))).reduce((a, b) => a + b, 0);
+    return { modCache: await size(path.join(shared, 'mod-cache')), game };
+  }
+
+  /** Удалить из кэша файлы модов, которые не нужны ни одной сборке (с учётом прежних составов для отката). */
+  async cleanModCache() {
+    if (this.installer.activePid || this.runningTask) throw new Error('Сейчас ставятся моды — очисти кэш после окончания.');
+    const used = new Set();
+    const add = (lock) => (lock?.mods || []).forEach((m) => m.file?.hashes?.sha1 && used.add(String(m.file.hashes.sha1).toLowerCase()));
+    for (const p of await this.store.listProfiles()) {
+      add(await this.store.getLock(p.id));
+      const dir = this.installer.historyDir(p.id);
+      for (const f of await fsp.readdir(dir).catch(() => [])) if (f.endsWith('.lock.json')) add(await readJson(path.join(dir, f)));
+    }
+    return { freed: await this.launcher.cache.gc(used) };
+  }
+
   /** Сколько модов можно обновить. Проверка через каталог — не чаще раза в 6 часов и заново после изменения состава. */
   async modUpdates(pid, { force = false } = {}) {
     const lock = await this.store.getLock(pid);
@@ -610,6 +730,19 @@ class Services extends EventEmitter {
     if (profile.kind === 'room') throw new Error('Сборка комнаты запускается из «С друзьями».');
     this.assertNotInstalling(profile.id);
     const budget = this.memoryBudget('play', settings, profile);
+    // связи модов по файлам: без обязательного мода игра всё равно вылетит — говорим заранее и предлагаем починку
+    if (!req.skipLinks && profile.loader !== 'vanilla') {
+      const report = await this.linkReport(profile.id).catch(() => null);
+      if (report?.missing.length) {
+        const task = await this.linkFixTask(profile.id, report).catch(() => null);
+        const list = report.missing.map((m) => `«${m.by.map((b) => b.name).join('», «')}» требует «${m.id}»`).join('; ');
+        throw Object.assign(new Error(`В сборке не хватает обязательных модов: ${list}. С таким составом игра вылетит при запуске.`), {
+          code: 'MISSING_DEPS',
+          action: task ? 'Нажми «Исправить» — лаунчер добавит недостающее из каталога или уберёт мод, которому его не хватает.' : 'Добавь недостающий мод в «Моды» или выключи мод, которому он нужен.',
+          task,
+        });
+      }
+    }
     // Модель помощника выгружается перед игрой, чтобы освободить память
     await this.ai.stop();
     const r = await this.launcher.play({
@@ -617,9 +750,12 @@ class Services extends EventEmitter {
       auth,
       nickname: settings.nickname,
       ram: budget.client,
-      options: settings.options,
+      options: settings.options || settings.window?.fullscreen ? { ...(settings.options || {}), fullscreen: !!settings.window?.fullscreen } : null,
       world: req.world || null,
       server: /^127\.0\.0\.1:\d{2,5}$/.test(req.server || '') ? req.server : null,
+      jvmArgs: settings.jvmArgs ? settings.jvmArgs.split(/\s+/).filter(Boolean) : [],
+      window: settings.window && !settings.window.fullscreen && settings.window.width ? settings.window : null,
+      javaPath: settings.javaPath || null,
     });
     await this.saveSettings({ lastProfile: profile.id });
     return r;
@@ -689,8 +825,13 @@ class Services extends EventEmitter {
     const id = crypto.randomBytes(8).toString('hex');
     this.plans.set(id, { pid, plan });
     if (this.plans.size > 20) this.plans.delete(this.plans.keys().next().value);
+    return Services.visible(plan, id);
+  }
+
+  /** Описание плана для интерфейса: без nextLock (адреса файлов и состав остаются в главном процессе). */
+  static visible(plan, planId) {
     const { nextLock, ...visible } = plan;
-    return { planId: id, ...visible, nextMinecraft: nextLock.minecraft, nextLoader: nextLock.loader, sizeBytes: nextLock.mods.filter((m) => plan.changes.some((c) => c.key === m.key && c.type !== 'remove')).reduce((a, m) => a + (m.file.size || 0), 0) };
+    return { planId, ...visible, nextMinecraft: nextLock.minecraft, nextLoader: nextLock.loader, sizeBytes: nextLock.mods.filter((m) => plan.changes.some((c) => c.key === m.key && c.type !== 'remove')).reduce((a, m) => a + (m.file.size || 0), 0) };
   }
 
   /** Простой план (только добавления, без ошибок, вопросов, ручных файлов и предупреждений) применяется без подтверждения. */
@@ -703,7 +844,7 @@ class Services extends EventEmitter {
     const plan = await this.planMods(pid, { add: [item] });
     if (!Services.isSimple(plan)) return { applied: false, plan };
     const r = await this.applyPlan(plan.planId);
-    return { applied: true, plan, lock: r.lock };
+    return { applied: true, plan, lock: r.lock, missing: r.missing };
   }
 
   async applyPlan(planId, imports = {}) {
@@ -717,7 +858,9 @@ class Services extends EventEmitter {
       const lock = await this.installer.apply(rec.pid, rec.plan, { signal: ac.signal, imports, onProgress: (p) => this.emit('mods-progress', p) });
       this.plans.delete(planId);
       await this.refreshRoom(rec.pid);
-      return { lock, backups };
+      // связи по файлам: каталог мог не знать об обязательной библиотеке — говорим сразу, а не при вылете
+      const links = await this.linkReport(rec.pid).catch(() => null);
+      return { lock, backups, missing: links?.missing || [] };
     } finally {
       this.modsAbort = null;
     }
@@ -929,9 +1072,14 @@ class Services extends EventEmitter {
     return st;
   }
 
-  /** Запрос к помощнику. Результат — понятие запроса, проверенный план (по id) или диагностика. */
-  async ask(text, pid) {
+  /**
+   * Запрос к помощнику. Помощник сам готовит всё действие целиком — новую сборку, моды, память и
+   * графику, починку вылета — и возвращает его описание с task.id. Выполняется оно одной кнопкой
+   * (runTask): игрок видит, что будет сделано, до того как что-то изменится.
+   */
+  async ask(text, pid, answers = null) {
     await this.aiStatus();
+    const ans = cleanAnswers(answers);
     const chat = smallTalk(String(text));
     if (chat) return { understoodBy: 'rules', intent: { intent: 'question' }, kind: 'message', message: chat };
     const asst = this.assistant();
@@ -940,45 +1088,497 @@ class Services extends EventEmitter {
     const intent = u.intent;
     const base = { understoodBy: u.by, rejected: u.rejected || null, intent };
     // текст ошибки (лог, стек) — сразу в диагностику, даже если модель решила иначе
-    if (intent.intent === 'diagnose' || diagnoseRules(text).length || /Exception|\w+Error\b|Caused by:|\[(ERROR|FATAL)\]/.test(text)) return { ...base, kind: 'diagnose', ...(await asst.diagnose(text)) };
-    if (intent.intent === 'optimize') {
-      const s = await this.settings();
-      const budget = this.memoryBudget('play', s);
-      const options = { render: intent.lowEnd ? 6 : 10, simulation: intent.lowEnd ? 4 : 6, fps: 120, graphics: intent.lowEnd ? 0 : 1 };
-      const perf = lock.loader === 'vanilla' ? null : await proposeMods({ ...intent, themes: ['performance'] }, { search: (q) => this.searchForProfile(q, lock), lock });
-      let plan = null;
-      if (perf?.add.length) plan = await this.planMods(pid, { add: perf.add.map((p) => ({ source: p.source, projectId: p.id })) });
-      return { ...base, kind: 'optimize', options, ram: budget.client, plan, note: 'Это стартовые настройки, а не замер. Сравни один и тот же мир до и после.' };
+    if (intent.intent === 'diagnose' || diagnoseRules(text).length || /Exception|\w+Error\b|Caused by:|\[(ERROR|FATAL)\]/.test(text)) {
+      const d = await asst.diagnose(text);
+      const task = d.findings?.length ? await this.fixTask(pid, d.findings).catch(() => null) : null;
+      return { ...base, kind: 'diagnose', ...d, task };
     }
-    if (lock.loader === 'vanilla' && ['build', 'add'].includes(intent.intent))
-      return { ...base, kind: 'needs-loader', message: 'Это сборка Vanilla — моды ставятся в сборку с загрузчиком (Fabric, Quilt, Forge или NeoForge). Создай её в «Сборки».' };
+    if (intent.intent === 'optimize') return { ...base, ...(await this.optimizeTask(pid, intent)) };
+    const wishes = builder.buildWishes(text);
+    if (intent.big) wishes.size = 'big';
+    // «сделай новую сборку» без темы — тоже сборка (темы по умолчанию)
+    if (wishes.wantsNew && intent.intent === 'question') intent.intent = 'build';
+    const other = (wishes.minecraft && wishes.minecraft !== lock.minecraft) || (wishes.loader && wishes.loader !== lock.loader);
+    let isNew = ['build', 'add'].includes(intent.intent) && (lock.loader === 'vanilla' || (intent.intent === 'build' && (wishes.wantsNew || other)));
+    // в сборке уже есть загрузчик — игрок сам выбирает в анкете: ставить моды в неё или собрать новую
+    if (isNew && lock.loader !== 'vanilla' && ans?.where === 'current') {
+      isNew = false;
+      if (!intent.themes.length && !intent.searchTerms.length) intent.themes = ['adventure', 'exploration'];
+    }
+    if (isNew) {
+      // сначала уточняющие вопросы: куда ставить, размер, версия, загрузчик, оптимизация, удобства, шейдеры, настройка ПК
+      if (!ans) {
+        const p = await this.store.getProfile(pid);
+        const current = lock.loader !== 'vanilla' ? { name: p.name, label: `${LOADER_LABEL[lock.loader] || lock.loader} ${lock.minecraft}`, preferNew: /нов|отдельн|с нуля|заново/i.test(text) || !!other } : null;
+        return { ...base, kind: 'clarify', text: String(text).slice(0, 4000), questions: await this.buildQuestions(intent, wishes, current) };
+      }
+      if (ans.size) wishes.size = ans.size;
+      if (ans.version) wishes.minecraft = ans.version === 'auto' ? null : ans.version;
+      if (ans.loader) wishes.loader = ans.loader === 'auto' ? null : ans.loader;
+      if (ans.visuals && !intent.themes.includes('visuals')) intent.themes = [...intent.themes, 'visuals'];
+      const roles = ans.perf === undefined && ans.qol === undefined ? null : [...(ans.perf !== false ? ['performance'] : []), ...(ans.qol !== false ? ['qol'] : [])];
+      return { ...base, ...(await this.newBuildTask(intent, wishes, { roles, setup: ans.setup !== false })) };
+    }
     if (intent.intent === 'remove') {
       const names = intent.searchTerms.map((t) => t.toLowerCase());
       const keys = lock.mods.filter((m) => names.some((n) => m.name.toLowerCase().includes(n))).map((m) => m.key);
-      if (!keys.length) return { ...base, kind: 'message', message: 'Не понял, какой мод убрать. Открой «Сборки» → сборка → «Моды» и выбери его в списке.' };
+      if (!keys.length) return { ...base, kind: 'message', message: 'Не понял, какой мод убрать. Напиши его название, как в списке модов сборки.' };
       const plan = await this.planMods(pid, { remove: keys });
-      return { ...base, kind: 'plan', plan, explanation: (await asst.explain(this.plans.get(plan.planId).plan)).text };
+      const task = plan.ok ? this.saveTask({ pid, planId: plan.planId, baseLock: lock, request: { remove: keys }, steps: plan.changes.map(stepOf) }) : null;
+      return { ...base, kind: 'plan', plan, explanation: (await asst.explain(this.plans.get(plan.planId).plan)).text, task };
     }
     if (intent.intent === 'question' || (!intent.themes.length && !intent.searchTerms.length))
-      return { ...base, kind: 'message', message: intent.clarify || 'Не понял, что подобрать. Напиши тему или названия модов: например «выживание с зомби и оружием», «приключения без сложной техники», «добавь Create». Для ошибки — вставь текст из latest.log.' };
-    const prop = await proposeMods(intent, { search: (q) => this.searchForProfile(q, lock), lock });
-    if (!prop.add.length) {
+      return { ...base, kind: 'message', message: intent.clarify || 'Не понял, что сделать. Напиши, во что хочешь играть: «сделай сборку с зомби и оружием», «добавь приключений без сложной техники», «добавь Create», «подними FPS». Для ошибки — вставь текст из latest.log.' };
+
+    // добавить к текущей сборке; по теме (а не по названиям: «добавь Create» — без вопросов) — сначала уточняющие вопросы
+    if (intent.themes.length && !intent.searchTerms.length && !ans) return { ...base, kind: 'clarify', text: String(text).slice(0, 4000), questions: addQuestions(intent) };
+    const provider = (await this.providers()).modrinth;
+    const size = ans?.amount === 'more' || (!ans?.amount && intent.big) ? 'more' : 'add';
+    const roles = ans?.perf || intent.lowEnd ? ['performance'] : [];
+    const pick = await builder.pickMods({ intent, target: lock, lock, provider, size, roles });
+    if (!pick.add.length) {
       const parts = [];
-      if (prop.notFound.length) parts.push(`В каталоге нет модов для ${lock.loader} ${lock.minecraft} с названием: ${prop.notFound.join(', ')}.`);
-      if (prop.already.length) parts.push(`Уже в сборке: ${prop.already.join(', ')}.`);
-      return { ...base, kind: 'message', message: parts.join(' ') || 'В каталоге не нашлось подходящих модов под эту версию игры.', notFound: prop.notFound, already: prop.already };
+      if (pick.notFound.length) parts.push(`В каталоге нет модов для ${LOADER_LABEL[lock.loader] || lock.loader} ${lock.minecraft} с названием: ${pick.notFound.join(', ')}.`);
+      if (pick.already.length) parts.push(`Уже в сборке: ${pick.already.join(', ')}.`);
+      return { ...base, kind: 'message', message: parts.join(' ') || 'В каталоге не нашлось подходящих модов под эту версию игры.', notFound: pick.notFound, already: pick.already };
     }
-    const plan = await this.planMods(pid, { add: prop.add.map((p) => ({ source: p.source, projectId: p.id })) });
-    const ex = await asst.explain(this.plans.get(plan.planId).plan, { otherNames: [] });
-    const note = intent.big
-      ? `Сразу сто модов я не собираю: у каждого проверяются версия, зависимости и конфликты, а большой непроверенный набор почти всегда не запускается. Это основа из ${prop.add.length} модов — попроси ещё («добавь оружие», «больше зомби») или добавь в разделе «Моды».`
-      : null;
-    return { ...base, kind: 'plan', plan, explanation: ex.text, explainedBy: ex.by, notFound: prop.notFound, already: prop.already, note };
+    await builder.prefetch(provider, pick.add, lock);
+    const { plan, items, dropped, request } = await builder.planPruned(this.planner(pid), pick.add);
+    const visible = Services.visible(plan, plan.planId);
+    const ex = items.length <= 10 ? await asst.explain(plan, { otherNames: [] }) : { text: `Подобрал ${items.length} модов под ${LOADER_LABEL[lock.loader] || lock.loader} ${lock.minecraft}. Совместимость, зависимости и конфликты проверены.`, by: 'template' };
+    const steps = plan.changes.map(stepOf);
+    // большая добавка — игре может не хватить памяти: поднимаем, если нужно
+    const s = await this.settings();
+    const budget = this.memoryBudget('play', s, await this.store.getProfile(pid));
+    const setup = builder.gameSetup({ totalGb: budget.total, reserveGb: budget.reserve, mods: plan.nextLock.mods.length, lowEnd: intent.lowEnd });
+    const ram = setup.ram > budget.client && ans?.setup !== false ? setup.ram : null;
+    if (ram) steps.push(`Выделить игре ${ram} ГБ памяти`);
+    const task = plan.ok && plan.changes.length ? this.saveTask({ pid, planId: plan.planId, baseLock: lock, request, ram, steps }) : null;
+    return { ...base, kind: 'plan', plan: visible, explanation: ex.text, explainedBy: ex.by, notFound: pick.notFound, already: pick.already, dropped: dropped.map(droppedText), task };
   }
 
-  async searchForProfile(q, lock) {
-    const p = await this.providers();
-    return (await p.modrinth.search({ query: q, minecraft: lock.minecraft, loader: lock.loader, limit: 10 })).hits;
+  /** План для существующей сборки в форме, нужной отсеву: полный (с nextLock) и с planId. */
+  planner(pid) {
+    return async (request) => {
+      const v = await this.planMods(pid, request);
+      return { ...this.plans.get(v.planId).plan, planId: v.planId };
+    };
+  }
+
+  /** Задание помощника хранится здесь; интерфейс получает только id и список шагов. */
+  saveTask(task) {
+    const id = crypto.randomBytes(8).toString('hex');
+    this.tasks.set(id, task);
+    if (this.tasks.size > 20) this.tasks.delete(this.tasks.keys().next().value);
+    return { id, steps: task.steps };
+  }
+
+  /**
+   * Уточняющие вопросы перед сборкой; ответы по умолчанию — из того, что игрок уже написал.
+   * current — выбранная сборка с загрузчиком: тогда первый вопрос «куда ставить моды», а вопросы
+   * только для новой сборки (only: 'new') или только для текущей (only: 'current') окно показывает по ответу.
+   */
+  async buildQuestions(intent, wishes, current = null) {
+    let latest = null;
+    try {
+      latest = (await this.launcher.versions()).find((v) => v.type === 'release')?.id || null;
+    } catch {}
+    const versions = [...new Set([latest, '1.21.1', '1.20.1', wishes.minecraft].filter(Boolean))];
+    const yes = (v) => [
+      { value: true, label: 'Да' },
+      { value: false, label: 'Нет' },
+    ].map((o) => ({ ...o, selected: o.value === v }));
+    const q = (id, title, hint, options, value, only) => ({ id, title, hint, only: current ? only || null : null, options: options.map((o) => ('selected' in o ? o : { ...o, selected: o.value === value })) });
+    // для самых свежих версий модов ещё мало — говорим об этом прямо в варианте
+    const vLabel = (v) => (['1.21.1', '1.20.1'].includes(v) ? v : v === latest ? `${v} (новая — модов пока мало)` : v);
+    return [
+      ...(current ? [q('where', 'Куда ставить моды', `Сейчас выбрана сборка «${current.name}» (${current.label})`, [{ value: 'current', label: `В «${current.name}»` }, { value: 'new', label: 'В новую сборку' }], current.preferNew ? 'new' : 'current')] : []),
+      q('amount', 'Сколько модов добавить', '', [{ value: 'few', label: 'Немного (до 8)' }, { value: 'more', label: 'Побольше (до 20)' }], wishes.size === 'big' ? 'more' : 'few', 'current'),
+      q('size', 'Размер сборки', 'Чем больше модов, тем дольше первый запуск и тем больше нужно памяти', [{ value: 'small', label: 'Маленькая (до 15 модов)' }, { value: 'normal', label: 'Обычная (до 35)' }, { value: 'big', label: 'Большая (до 70)' }], wishes.size, 'new'),
+      q('version', 'Версия Minecraft', 'Под 1.21.1 и 1.20.1 модов больше всего', [{ value: 'auto', label: 'Подбери сам' }, ...versions.map((v) => ({ value: v, label: vLabel(v) }))], wishes.minecraft || 'auto', 'new'),
+      q('loader', 'Загрузчик модов', 'Fabric — лёгкий и быстрый; Forge и NeoForge — большие моды', [{ value: 'auto', label: 'Подбери сам' }, { value: 'fabric', label: 'Fabric' }, { value: 'forge', label: 'Forge' }, { value: 'neoforge', label: 'NeoForge' }], wishes.loader || 'auto', 'new'),
+      q('perf', 'Моды оптимизации (больше FPS)', 'Sodium/Embeddium, Lithium, FerriteCore и др. — игра не меняется, только быстрее', yes(true)),
+      q('qol', 'Удобства', 'Миникарта, книга рецептов, подсказки о блоках', yes(wishes.size !== 'small'), null, 'new'),
+      q('visuals', 'Шейдеры и красивая графика', 'Нужна хорошая видеокарта', yes(intent.themes.includes('visuals')), null, 'new'),
+      q('setup', 'Настроить память и графику под мой ПК', 'Сколько памяти дать игре и какую дальность прорисовки поставить', yes(true)),
+    ].filter((x) => current || x.id !== 'amount');
+  }
+
+  /** Новая сборка: версия и загрузчик под темы, подборка модов, проверенный план, память и графика. */
+  async newBuildTask(intent, wishes, { roles = null, setup: doSetup = true } = {}) {
+    const provider = (await this.providers()).modrinth;
+    let releases = [];
+    try {
+      releases = (await this.launcher.versions()).filter((v) => v.type === 'release').map((v) => v.id);
+    } catch {}
+    // свежая версия, если под неё уже есть моды; иначе — версии, под которые модов больше всего
+    const versions = [releases[0], '1.21.1', '1.20.1'].filter(Boolean);
+    let targets;
+    try {
+      const supported = async (l) => {
+        const list = await this.loaderSupport(l);
+        return list ? new Set(list) : null;
+      };
+      targets = await builder.rankTargets({ intent, wishes, provider, versions, supported });
+    } catch (e) {
+      return { kind: 'message', message: 'Каталог модов сейчас недоступен: ' + e.message + ' Проверь интернет и попробуй ещё раз.' };
+    }
+    if (!targets.length)
+      return { kind: 'message', message: wishes.minecraft ? `Для Minecraft ${wishes.minecraft}${wishes.loader ? ' и ' + (LOADER_LABEL[wishes.loader] || wishes.loader) : ''} я не нашёл подходящих модов. Попробуй 1.21.1 или 1.20.1 — под них модов больше всего.` : 'Каталог модов не ответил — не из чего собирать. Проверь интернет и попробуй ещё раз.' };
+    // Каталог указывает версии и загрузчики проекта в целом, а не по релизам: если проверка отсеяла
+    // больше четверти подборки — пробуем следующую пару и берём ту, где модов осталось больше
+    const providers = await this.providers();
+    let best = null;
+    for (const target of targets.slice(0, 2)) {
+      const lock = emptyLock(target.minecraft, target.loader);
+      const pick = await builder.pickMods({ intent, target, lock, provider, size: wishes.size, roles });
+      if (!pick.add.length) continue;
+      await builder.prefetch(provider, pick.add, target);
+      const r = await builder.planPruned((request) => planChanges({ lock, request, providers }), pick.add);
+      if (r.plan.ok && (!best || r.items.length > best.items.length)) best = { target, pick, lock, ...r };
+      if (best && best.dropped.length <= best.items.length / 4) break;
+    }
+    if (!best) return { kind: 'message', message: `Не получилось собрать проверенный набор под ${targets.map((t) => `${LOADER_LABEL[t.loader]} ${t.minecraft}`).slice(0, 2).join(' или ')}. Попробуй другую тему или версию.` };
+    const { target, pick, plan, items, dropped, request, lock: baseLock } = best;
+    const s = await this.settings();
+    const budget = this.memoryBudget('play', s);
+    const setup = builder.gameSetup({ totalGb: budget.total, reserveGb: budget.reserve, mods: plan.nextLock.mods.length, lowEnd: intent.lowEnd });
+    // общие настройки графики меняем, только если игрок их ещё не задавал или просил про FPS (и не отказался от настройки)
+    const options = doSetup && (!s.options || intent.lowEnd || intent.themes.includes('performance')) ? setup.options : null;
+    const ram = doSetup ? setup.ram : null;
+    const name = builder.buildName(pick.themes.filter((t) => t !== 'visuals' || pick.themes.length === 1));
+    const deps = plan.changes.filter((c) => c.dependencyOf).length;
+    const steps = [
+      `Создать сборку «${name}»: Minecraft ${target.minecraft}, ${LOADER_LABEL[target.loader]}`,
+      `Поставить ${items.length} ${plural(items.length, 'мод', 'мода', 'модов')}${deps ? ` и ${deps} ${plural(deps, 'библиотеку', 'библиотеки', 'библиотек')}, ${deps === 1 ? 'нужную' : 'нужных'} им` : ''}`,
+      'Проверить файлы модов: всё ли нужное для запуска на месте',
+      ram ? `Выделить игре ${ram} ГБ памяти` : null,
+      options ? `Настроить графику: прорисовка ${options.render} чанков, ${options.graphics ? 'детальная' : 'быстрая'} графика, до ${options.fps} FPS` : null,
+    ].filter(Boolean);
+    const task = this.saveTask({ pid: null, create: { name, minecraft: target.minecraft, loader: target.loader }, plan, baseLock, request, ram, options, steps });
+    const groups = [];
+    for (const a of items) {
+      const title = groupTitle(a.reason);
+      const g = groups.find((x) => x.title === title) || groups[groups.push({ title, names: [] }) - 1];
+      g.names.push(a.name);
+    }
+    return {
+      kind: 'build',
+      build: { name, minecraft: target.minecraft, loader: target.loader, mods: items.length, deps },
+      groups,
+      plan: Services.visible(plan, null),
+      notFound: pick.notFound,
+      dropped: dropped.map(droppedText),
+      note: wishes.size === 'big' ? 'Большая сборка: каждый мод проверен на версию, зависимости и заявленные авторами конфликты. Первый запуск будет долгим — игра готовит много модов.' : null,
+      task,
+    };
+  }
+
+  /** «Подними FPS»: моды оптимизации, память и графика под этот ПК. */
+  async optimizeTask(pid, intent) {
+    const lock = await this.store.getLock(pid);
+    const s = await this.settings();
+    const budget = this.memoryBudget('play', s, await this.store.getProfile(pid));
+    const setup = builder.gameSetup({ totalGb: budget.total, reserveGb: budget.reserve, mods: lock.mods.length, lowEnd: intent.lowEnd, fps: true });
+    let plan = null;
+    let request = null;
+    if (lock.loader !== 'vanilla') {
+      const provider = (await this.providers()).modrinth;
+      const pick = await builder.pickMods({ intent: { ...intent, themes: [], searchTerms: [], lowEnd: true }, target: lock, lock, provider, size: 'add' });
+      if (pick.add.length) {
+        const r = await builder.planPruned(this.planner(pid), pick.add);
+        if (r.plan.ok && r.plan.changes.length) ({ plan, request } = r);
+      }
+    }
+    const o = setup.options;
+    // память только добавляем: уменьшать то, что игрок выставил сам, ради FPS незачем
+    const ram = setup.ram > budget.client ? setup.ram : null;
+    const steps = [...(plan ? plan.changes.map(stepOf) : []), ...(ram ? [`Выделить игре ${ram} ГБ памяти`] : []), `Графика: прорисовка ${o.render} чанков, симуляция ${o.simulation}, ${o.graphics ? 'детальная' : 'быстрая'}, до ${o.fps} FPS`];
+    const task = this.saveTask({ pid, planId: plan?.planId || null, baseLock: lock, request, ram, options: o, steps });
+    return { kind: 'optimize', options: o, ram: ram || budget.client, plan: plan ? Services.visible(plan, plan.planId) : null, note: 'Это стартовые настройки, а не замер. Сравни один и тот же мир до и после.', task };
+  }
+
+  /**
+   * Починка по найденным причинам вылета: недостающая зависимость — добавить, несовместимые моды —
+   * убрать позже добавленный, сбой Mixin — обновить мод (нет обновления — убрать), мод для другой
+   * версии — обновить всё, нехватка памяти — добавить. null — исправить автоматически нечего.
+   */
+  async fixTask(pid, findings) {
+    const lock = await this.store.getLock(pid);
+    const provider = (await this.providers()).modrinth;
+    const norm = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const findMod = (name) => lock.mods.find((m) => [m.slug, m.name, m.projectId].some((x) => x && norm(x) === norm(name)));
+    const add = [];
+    const remove = [];
+    let update = [];
+    let updateAll = false;
+    let mixinKey = null;
+    let ram = null;
+    for (const f of findings) {
+      const d = f.data || {};
+      if (f.id.startsWith('missing-dep') && lock.loader !== 'vanilla') {
+        const p = await this.findDependency(provider, lock, d.depId, d.depName);
+        if (p && !lock.mods.some((m) => m.key === p.key)) add.push({ source: 'modrinth', projectId: p.id });
+      } else if (f.id === 'incompatible' && d.a && d.b) {
+        // из пары убираем тот, что добавлен в сборку позже
+        const pair = [findMod(d.a), findMod(d.b)].filter(Boolean).sort((x, y) => lock.mods.indexOf(y) - lock.mods.indexOf(x));
+        if (pair[0]) remove.push(pair[0].key);
+      } else if (f.id === 'mixin' && d.modId) {
+        const m = findMod(d.modId);
+        if (m) update.push((mixinKey = m.key));
+      } else if ((f.id === 'wrong-mc' || f.id === 'java-version') && lock.mods.length) updateAll = true;
+      else if (f.id === 'oom') {
+        const s = await this.settings();
+        const budget = this.memoryBudget('play', s, await this.store.getProfile(pid));
+        const more = Math.min(budget.client + 2, budget.total - budget.reserve);
+        if (more > budget.client) ram = more;
+      }
+    }
+    let plan = null;
+    let request = null;
+    if (add.length || remove.length || update.length || updateAll) {
+      request = { add, remove, update: updateAll ? 'all' : update };
+      plan = await this.planMods(pid, request);
+      // у мода со сбоем Mixin нет обновления — убираем его
+      if (mixinKey && !plan.changes.some((c) => c.key === mixinKey && c.type === 'update')) {
+        update = update.filter((k) => k !== mixinKey);
+        request = { add, remove: [...remove, mixinKey], update: updateAll ? 'all' : update };
+        plan = await this.planMods(pid, request);
+      }
+      if (!plan.ok || !plan.changes.length) plan = null;
+    }
+    if (!plan && !ram) return null;
+    const steps = [...(plan ? plan.changes.map(stepOf) : []), ...(ram ? [`Выделить игре ${ram} ГБ памяти`] : [])];
+    return { ...this.saveTask({ pid, planId: plan?.planId || null, baseLock: lock, request: plan ? request : null, ram, steps }), significant: !!plan?.significant };
+  }
+
+  /** Недостающая зависимость по id мода из журнала (обычно совпадает со slug Modrinth) или по названию. */
+  async findDependency(provider, lock, depId, depName) {
+    const ALIAS = { fabric: 'fabric-api', 'cloth-config2': 'cloth-config', cloth_config: 'cloth-config', architectury: 'architectury-api', geckolib3: 'geckolib' };
+    if (['minecraft', 'java', 'fabricloader', 'forge', 'neoforge', 'quilt_loader'].includes(depId)) return null;
+    for (const slug of [...new Set([ALIAS[depId] || depId, depId && depId.replace(/_/g, '-')])].filter(Boolean)) {
+      try {
+        const p = await provider.project(slug);
+        if (builder.fits(p, lock)) return p;
+      } catch {}
+    }
+    // по названию или по id без разделителей: puzzleslib → «Puzzles Lib» (slug puzzles-lib)
+    const n = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+    for (const q of [...new Set([depName, depId].filter(Boolean))]) {
+      try {
+        const hits = (await provider.search({ query: q, minecraft: lock.minecraft, loader: lock.loader, limit: 10 })).hits;
+        const hit = hits.find((h) => [h.name, h.slug].some((x) => n(x) === n(depName) || n(x) === n(depId)));
+        if (hit) return hit;
+      } catch {}
+    }
+    return null;
+  }
+
+  /**
+   * Обязательная библиотека по id мода из его файла: сначала Modrinth, затем CurseForge (часть библиотек
+   * есть только там). Версия — стабильный релиз, иначе тестовый (лучше, чем вылет); файл должен
+   * скачиваться автоматически. → { source, project, version } или null.
+   */
+  async findLibrary(providers, lock, id) {
+    const target = { minecraft: lock.minecraft, loader: lock.loader };
+    const pick = async (source, p) => {
+      if (!p) return null;
+      const vs = await providers[source].versions(p.id, target).catch(() => []);
+      vs.sort((a, b) => String(b.published).localeCompare(String(a.published)));
+      const v = vs.find((x) => x.type === 'release') || vs[0];
+      const f = v && (v.files.find((x) => x.primary) || v.files[0]);
+      return f?.url ? { source, project: p, version: v } : null;
+    };
+    const mr = await pick('modrinth', await this.findDependency(providers.modrinth, lock, id, null));
+    if (mr || !providers.curseforge?.status().available) return mr;
+    const n = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+    try {
+      const hits = (await providers.curseforge.search({ query: id, minecraft: lock.minecraft, loader: lock.loader, limit: 10 })).hits;
+      return await pick('curseforge', hits.find((h) => [h.name, h.slug].some((x) => n(x) === n(id))));
+    } catch {
+      return null;
+    }
+  }
+
+  /** Файлы модов для проверки связей: состав сборки (из кэша) и свои JAR игрока из папки mods. */
+  linkEntries(lock, pid = null) {
+    const cache = this.launcher.cache;
+    const entries = lock.mods.filter((m) => m.enabled !== false && cache.has(m.file)).map((m) => ({ name: m.name, key: m.key, file: cache.pathFor(m.file) }));
+    if (pid) {
+      const dir = path.join(this.store.gameDir(pid), 'mods');
+      let managed = [];
+      try {
+        managed = JSON.parse(fs.readFileSync(path.join(dir, '.easylauncher-managed.json'), 'utf8')).files || [];
+      } catch {}
+      let files = [];
+      try {
+        files = fs.readdirSync(dir).filter((f) => /\.jar$/i.test(f) && !managed.includes(f));
+      } catch {}
+      // файл, положенный игроком вручную: что он даёт — учитываем, его требования исправить не можем
+      for (const f of files) entries.push({ name: f, file: path.join(dir, f), providerOnly: true });
+    }
+    return entries;
+  }
+
+  /** Проверка связей модов сборки по файлам: каких обязательных модов не хватает. */
+  async linkReport(pid) {
+    const lock = await this.store.getLock(pid);
+    if (lock.loader === 'vanilla') return { missing: [], conflicts: [] };
+    const on = lock.mods.filter((m) => m.enabled !== false);
+    if (on.some((m) => !this.launcher.cache.has(m.file))) await this.fetchFiles(on).catch(() => {});
+    // без всех файлов сравнивать нечестно: не скачанный мод выглядел бы «недостающим»
+    if (on.some((m) => !this.launcher.cache.has(m.file))) return { missing: [], conflicts: [] };
+    return checkLinks(this.linkEntries(lock, pid), lock.loader);
+  }
+
+  /** Скачать файлы модов в общий кэш (установка потом возьмёт их оттуда) — с прогрессом, как у установки. */
+  async fetchFiles(mods) {
+    const cache = this.launcher.cache;
+    const todo = mods.filter((m) => m.file?.url && !cache.has(m.file));
+    const total = todo.reduce((a, m) => a + (m.file.size || 0), 0);
+    let done = 0;
+    for (const m of todo) {
+      await cache.ensure(m, {
+        onBytes: (b) => {
+          done += b;
+          this.emit('mods-progress', { phase: 'download', done, total, name: m.name });
+        },
+      });
+    }
+  }
+
+  /**
+   * Проверка связей перед установкой задания помощника: скачанные файлы читаются, недостающий
+   * обязательный мод ищется в каталоге и добавляется; не нашёлся — убирается мод, которому он нужен.
+   * → { plan, added: [названия], removed: [названия] }
+   */
+  async resolveLinks(t, plan) {
+    const providers = await this.providers();
+    const base = t.baseLock;
+    let request = { ...t.request };
+    const added = [];
+    const removed = [];
+    const names = new Map(plan.nextLock.mods.map((m) => [m.key, m.name]));
+    const dropAdds = (keys) => {
+      for (const k of keys) if (names.has(k) && !removed.includes(names.get(k))) removed.push(names.get(k));
+      request = { ...request, add: (request.add || []).filter((a) => !keys.has(lockLib.keyOf(a.source, a.projectId))) };
+    };
+    for (let round = 0; round < 6; round++) {
+      if (!plan.ok) {
+        // после добавления библиотеки план не сошёлся (например, её нет под эту версию) — убираем виновный мод
+        const explicit = new Map((request.add || []).map((a) => [lockLib.keyOf(a.source, a.projectId), a]));
+        const bad = new Set(plan.errors.flatMap((e) => builder.culprits(plan, e, explicit)));
+        if (!bad.size) throw new Error('После проверки файлов модов план не сходится: ' + plan.errors.map((e) => e.message).slice(0, 2).join(' '));
+        dropAdds(bad);
+        plan = await planChanges({ lock: base, request, providers });
+        continue;
+      }
+      await this.fetchFiles(plan.nextLock.mods.filter((m) => m.enabled !== false));
+      const report = checkLinks(this.linkEntries(plan.nextLock, t.pid), base.loader);
+      if (!report.missing.length) break;
+      const add = [];
+      const drop = new Set();
+      for (const miss of report.missing) {
+        const lib = await this.findLibrary(providers, plan.nextLock, miss.id);
+        const key = lib && lockLib.keyOf(lib.source, lib.project.id);
+        if (lib && !plan.nextLock.mods.some((m) => m.key === key) && !add.some((a) => lockLib.keyOf(a.source, a.projectId) === key)) {
+          add.push({ source: lib.source, projectId: String(lib.project.id), versionId: lib.version.id });
+          added.push(`${lib.project.name}${lib.version.type === 'release' ? '' : ` (тестовая версия ${lib.version.number} — другой нет)`}${lib.source === 'curseforge' ? ' с CurseForge' : ''}`);
+          names.set(key, lib.project.name);
+        } else for (const b of miss.by) if (b.key) drop.add(b.key);
+      }
+      if (!add.length && !drop.size) break;
+      // убрать мод — значит убрать и те, кому он обязательно нужен
+      const mods = plan.nextLock.mods;
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const m of mods) {
+          if (drop.has(m.key) || !(m.dependencies || []).some((d) => d.kind === 'required' && drop.has(d.key))) continue;
+          drop.add(m.key);
+          grew = true;
+        }
+      }
+      for (const k of drop) {
+        const m = mods.find((x) => x.key === k);
+        if (m && m.addedBy !== 'dependency' && !removed.includes(m.name)) removed.push(m.name);
+      }
+      const inBase = new Set(base.mods.map((m) => m.key));
+      request = {
+        ...request,
+        add: [...(request.add || []).filter((a) => !drop.has(lockLib.keyOf(a.source, a.projectId))), ...add],
+        remove: [...new Set([...(request.remove || []), ...[...drop].filter((k) => inBase.has(k))])],
+      };
+      plan = await planChanges({ lock: base, request, providers });
+      plan.significant = plan.changes.some((c) => c.type === 'remove');
+    }
+    if (!plan.ok) throw new Error('После проверки файлов модов план не сходится: ' + plan.errors.map((e) => e.message).slice(0, 2).join(' '));
+    return { plan, added, removed };
+  }
+
+  /** Задание «исправить связи» для сборки: добавить недостающие обязательные моды из каталога, иначе убрать требующий. */
+  async linkFixTask(pid, report) {
+    const lock = await this.store.getLock(pid);
+    const providers = await this.providers();
+    const add = [];
+    const remove = [];
+    for (const miss of report.missing) {
+      const lib = await this.findLibrary(providers, lock, miss.id);
+      if (lib && !lock.mods.some((m) => m.key === lockLib.keyOf(lib.source, lib.project.id))) add.push({ source: lib.source, projectId: String(lib.project.id), versionId: lib.version.id });
+      else remove.push(...miss.by.map((b) => b.key).filter(Boolean));
+    }
+    if (!add.length && !remove.length) return null;
+    const request = { add, remove: [...new Set(remove)] };
+    const plan = await this.planMods(pid, request);
+    if (!plan.ok || !plan.changes.length) return null;
+    return { ...this.saveTask({ pid, planId: plan.planId, baseLock: lock, request, steps: plan.changes.map(stepOf) }), significant: !!plan.significant };
+  }
+
+  /**
+   * Выполнить задание помощника: создать сборку, поставить моды (с проверкой файлов и откатом при сбое),
+   * выставить память и графику. Сбой после создания сборки — повтор продолжит в ту же сборку.
+   */
+  async runTask(taskId) {
+    const t = this.tasks.get(String(taskId));
+    if (!t) throw new Error('Это предложение устарело — попроси помощника ещё раз.');
+    if (this.runningTask) throw new Error('Помощник уже выполняет задание — дождись окончания.');
+    this.runningTask = t;
+    try {
+      let links = { added: [], removed: [] };
+      // проверка связей по самим файлам модов — до создания сборки и до изменения состава
+      let plan = t.plan || (t.planId ? this.plans.get(t.planId)?.plan : null);
+      if (t.planId && !plan) throw new Error('Это предложение устарело — попроси помощника ещё раз.');
+      if (plan && t.request && t.baseLock && !t.linksChecked) {
+        links = await this.resolveLinks(t, plan);
+        plan = links.plan;
+        t.linksChecked = true;
+        t.plan = plan;
+        t.planId = null;
+      }
+      if (t.create) {
+        const p = await this.createProfile(t.create);
+        t.pid = p.id;
+        t.created = true;
+        t.create = null;
+      }
+      let backups = [];
+      if (plan && plan.changes.length) {
+        if (!t.planId) {
+          t.planId = crypto.randomBytes(8).toString('hex');
+          this.plans.set(t.planId, { pid: t.pid, plan });
+        }
+        backups = (await this.applyPlan(t.planId)).backups;
+        t.planId = null;
+        t.plan = null;
+      }
+      if (t.ram) await this.updateProfile(t.pid, { ram: t.ram });
+      if (t.options) await this.saveSettings({ options: t.options });
+      await this.saveSettings({ lastProfile: t.pid });
+      this.tasks.delete(String(taskId));
+      return { profileId: t.pid, created: !!t.created, backups, linksAdded: links.added || [], linksRemoved: links.removed || [] };
+    } finally {
+      this.runningTask = null;
+    }
   }
 
   async shutdown() {

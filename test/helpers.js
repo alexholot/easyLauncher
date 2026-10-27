@@ -23,6 +23,9 @@ function buildFixtures() {
   return built;
 }
 
+// «Java от Mojang» в имитации — sh-сценарий bin/java; на Windows лаунчер ищет bin\java.exe, такой рантайм не запустить
+const NO_FAKE_JAVA = process.platform === 'win32' ? 'на Windows имитация Java от Mojang (sh-сценарий) не запускается' : null;
+
 const fakeVersion = {
   id: '1.21.1',
   mainClass: 'FakeClient',
@@ -136,4 +139,4 @@ public class ${name} {
   return probe;
 }
 
-module.exports = { oldGameProbe, fakeForgeTool, fakeForgeInstaller, buildFixtures, testLauncher, waitEvent, fakeVersion };
+module.exports = { NO_FAKE_JAVA, oldGameProbe, fakeForgeTool, fakeForgeInstaller, buildFixtures, testLauncher, waitEvent, fakeVersion };

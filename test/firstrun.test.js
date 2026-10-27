@@ -8,10 +8,11 @@ const path = require('path');
 const http = require('../core/http');
 const { Launcher } = require('../core/launcher');
 const { createFakeMojang } = require('./fakemojang');
-const { buildFixtures, waitEvent } = require('./helpers');
+const { NO_FAKE_JAVA, buildFixtures, waitEvent } = require('./helpers');
 
 test('первый запуск скачивает игру, Java и ресурсы с реальным прогрессом; повторный — без сети', async (t) => {
   if (!buildFixtures().ok) return t.skip('нет JDK');
+  if (NO_FAKE_JAVA) return t.skip(NO_FAKE_JAVA);
   const fm = await createFakeMojang({ delayMs: 0 });
   http.setFetch((url, o) => fetch(fm.rewrite(url), o));
   const l = new Launcher(fs.mkdtempSync(path.join(os.tmpdir(), 'easy-first-')), { totalMem: 16 * 1024 ** 3 });

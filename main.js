@@ -19,7 +19,10 @@ app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
 // easyimg://img/?f=<путь> — показ обложек и скриншотов из папки лаунчера (только изображения, только внутри неё)
 protocol.registerSchemesAsPrivileged([{ scheme: 'easyimg', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
 
-if (!app.requestSingleInstanceLock()) app.quit();
+// Вторая копия (например, ярлык нажат, пока лаунчер уже открыт после установки) только передаёт фокус
+// первой и сразу выходит — без запуска сервисов, окна и записи в общие файлы
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) app.quit();
 
 let win = null;
 let svc = null;
@@ -27,6 +30,24 @@ let accounts = null;
 let tray = null;
 let quitting = false;
 let pendingInvite = (process.argv.find((a) => a.startsWith('easylauncher://')) || null);
+
+// Журнал лаунчера: ошибки действий и неожиданные сбои — чтобы игрок мог прислать файл, а не пересказывать
+const ROOT = process.env.EASYLAUNCHER_HOME || path.join(app.getPath('appData'), '.easylauncher');
+const LOG_FILE = path.join(ROOT, 'logs', 'launcher.log');
+function logError(where, e) {
+  try {
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 1024 * 1024) fs.renameSync(LOG_FILE, LOG_FILE + '.old');
+    const line = `[${new Date().toISOString()}] ${app.getVersion()} ${where}: ${e?.code ? e.code + ' ' : ''}${e?.stack || e?.message || e}\n`;
+    fs.appendFileSync(LOG_FILE, line);
+  } catch {}
+}
+process.on('uncaughtException', (e) => {
+  logError('сбой', e);
+  // не закрываемся молча: объясняем и показываем, где журнал
+  dialog.showErrorBox('easyLauncher: что-то пошло не так', `${e?.message || e}\n\nЕсли повторяется — перезапусти лаунчер. Подробности записаны в журнал:\n${LOG_FILE}`);
+});
+process.on('unhandledRejection', (e) => logError('необработано', e));
 
 function send(channel, data) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, data);
@@ -172,14 +193,16 @@ function handle(channel, fn) {
     try {
       return { ok: true, value: await fn(...args) };
     } catch (e) {
-      return { ok: false, error: { message: e.message, code: e.code || null, action: e.action || null, missing: e.missing || null, status: e.status || null } };
+      if (e?.code !== 'CANCELLED') logError(channel, e);
+      return { ok: false, error: { message: e.message, code: e.code || null, action: e.action || null, missing: e.missing || null, status: e.status || null, task: e.task || null } };
     }
   });
 }
 
 app.whenReady().then(async () => {
+  if (!gotLock) return;
   http.setFetch((url, opts) => net.fetch(url, opts));
-  const root = process.env.EASYLAUNCHER_HOME || path.join(app.getPath('appData'), '.easylauncher');
+  const root = ROOT;
   fs.mkdirSync(root, { recursive: true });
   accounts = new Accounts(root, {
     available: safeStorage.isEncryptionAvailable(),
@@ -191,8 +214,25 @@ app.whenReady().then(async () => {
   // строки журнала интерфейсу не нужны (журнал читается по запросу), а прогресс загрузки
   // приходит сотни раз в секунду — отправляем не чаще 10 раз в секунду, смену этапа — сразу
   let lastStage = { key: '', at: 0 };
+  let hiddenForGame = false;
   svc.on('event', (ev) => {
     if (ev.type === 'log') return;
+    // «Настройки» → «Когда игра запущена»: свернуть или спрятать лаунчер, вернуть после закрытия игры
+    if (ev.type === 'client' && win && !win.isDestroyed()) {
+      svc
+        .settings()
+        .then((s) => {
+          if (ev.state === 'running' && s.afterLaunch === 'minimize') win.minimize();
+          else if (ev.state === 'running' && s.afterLaunch === 'hide') {
+            hiddenForGame = true;
+            win.hide();
+          } else if (ev.state === 'stopped' && hiddenForGame) {
+            hiddenForGame = false;
+            win.show();
+          }
+        })
+        .catch(() => {});
+    }
     if (ev.type === 'stage') {
       const key = ev.stage + '|' + (ev.detail || '').split(':')[0];
       const now = Date.now();
@@ -249,6 +289,12 @@ app.whenReady().then(async () => {
 
   handle('settings:get', () => svc.settings());
   handle('settings:set', (patch) => svc.saveSettings(patch));
+  handle('storage:info', () => svc.storageInfo());
+  handle('storage:clean', () => svc.cleanModCache());
+  handle('java:pick', async () => {
+    const r = await dialog.showOpenDialog(win, { title: 'Файл Java (java.exe из папки bin)', filters: [{ name: 'Java', extensions: process.platform === 'win32' ? ['exe'] : ['*'] }], properties: ['openFile'] });
+    return r.canceled ? null : svc.saveSettings({ javaPath: r.filePaths[0] });
+  });
   handle('bg:set', async (mode) => {
     if (mode !== 'custom') return svc.setBackground(mode);
     const file = await pickImage('Картинка для фона');
@@ -344,6 +390,7 @@ app.whenReady().then(async () => {
   handle('ai:install', async (plan) => {
     // ставим только план, который лаунчер сам получил в ai:plan: адреса и пути из окна не принимаются
     const own = svc.ai.lastPlan;
+    if (svc.ai.installing) throw new Error(`Уже скачивается ${svc.ai.installing.label} — дождись окончания.`);
     if (!own || own.model.id !== plan?.model?.id) throw new Error('Сначала узнай размер модели.');
     const r = await svc.ai.install(own, { onProgress: (p) => send('ai:progress', p) });
     await svc.aiStatus();
@@ -351,7 +398,9 @@ app.whenReady().then(async () => {
   });
   handle('ai:uninstall', () => svc.ai.uninstall());
   handle('ai:unload', () => svc.ai.stop());
-  handle('ai:ask', (text, pid) => svc.ask(text, pid));
+  handle('ai:ask', (text, pid, answers) => svc.ask(text, pid, answers));
+  // выполняется только задание, которое помощник сам подготовил в ai:ask: окно передаёт лишь его id
+  handle('ai:run', (taskId) => svc.runTask(taskId));
 
   handle('open:folder', (kind, pid, folder) => {
     let dir = root;
@@ -360,6 +409,7 @@ app.whenReady().then(async () => {
     else if (kind === 'screenshots') dir = path.join(svc.store.gameDir(pid), 'screenshots');
     else if (kind === 'world') dir = svc.worlds.dir(pid, folder);
     else if (kind === 'backups') dir = svc.worlds.backupsDir(pid, folder);
+    else if (kind === 'logs') dir = path.dirname(LOG_FILE);
     fs.mkdirSync(dir, { recursive: true });
     return shell.openPath(dir);
   });

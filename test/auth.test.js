@@ -77,7 +77,7 @@ test('понятные ошибки: нет Xbox-профиля, нет игры
   const r3 = goodRoutes();
   r3['https://api.minecraftservices.com/authentication/login_with_xbox'] = () => [403, {}];
   mockFetch(r3);
-  await assert.rejects(auth.minecraftLogin('ms-at'), /не одобрен/);
+  await assert.rejects(auth.minecraftLogin('ms-at'), (e) => e.code === 'APP_NOT_APPROVED' && /не одобрил/.test(e.message) && /Играть без входа/.test(e.action));
 });
 
 test('аккаунт: вход, шифрованное хранение, обновление токена, выход', async () => {

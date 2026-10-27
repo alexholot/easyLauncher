@@ -131,6 +131,23 @@ class ModrinthProvider {
     return { ...normProject({ ...p, project_id: p.id, versions: p.game_versions }), body: (p.body || '').slice(0, 4000) };
   }
 
+  /**
+   * Несколько проектов одним запросом (по id или slug); неизвестные просто отсутствуют в ответе.
+   * Каждый ответ кладётся в кэш как /project/{id} и /project/{slug}: план потом не запрашивает их заново.
+   */
+  async projects(ids) {
+    const out = [];
+    for (let i = 0; i < ids.length; i += 80) {
+      const list = await this.get('/projects', { ids: JSON.stringify(ids.slice(i, i + 80)) });
+      const until = Date.now() + 5 * 60 * 1000;
+      for (const p of list || []) {
+        for (const k of [p.id, p.slug]) if (k) this.cache.set(`${this.base}/project/${encodeURIComponent(k)}`, { data: p, until });
+        out.push({ ...normProject({ ...p, project_id: p.id, versions: p.game_versions }), loaders: p.loaders || [] });
+      }
+    }
+    return out;
+  }
+
   /** Релизы проекта. all=true — без фильтра по версии/загрузчику (для просмотра несовместимых). */
   async versions(id, { minecraft, loader, all = false } = {}) {
     const params = {};

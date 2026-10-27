@@ -192,6 +192,10 @@ test('помощник без модели: план только из ката�
   const s = services('ai');
   const p = await s.createProfile({ name: 'Тест', minecraft: '1.21.1', loader: 'fabric' });
   const pid = p.id;
+  // только по теме — сначала уточняющие вопросы; названный мод («с Create») — сразу подбор
+  const q = await s.ask('добавь приключений и магии', pid);
+  assert.equal(q.kind, 'clarify');
+  assert.deepEqual(q.questions.map((x) => x.id), ['amount', 'perf', 'setup']);
   const r = await s.ask('Собери выживание с Create для четырёх друзей', pid);
   assert.equal(r.understoodBy, 'rules');
   assert.equal(r.kind, 'plan');
@@ -199,8 +203,14 @@ test('помощник без модели: план только из ката�
   const d = await s.ask("java.lang.UnsupportedClassVersionError: class file version 65.0, this version of the Java Runtime only recognizes class file versions up to 61.0", pid);
   assert.equal(d.kind, 'diagnose');
   assert.equal(d.findings[0].id, 'java-version');
+  // в Vanilla моды не ставятся — помощник готовит новую сборку с загрузчиком (без сети Mojang и загрузчиков)
+  s.launcher.versions = async () => [{ id: '1.21.1', type: 'release' }];
+  s.loaderSupport = async () => null;
   const vanilla = await s.createProfile({ name: 'Ванилла', minecraft: '1.21.1' });
-  assert.equal((await s.ask('добавь Create', vanilla.id)).kind, 'needs-loader');
+  const nb = await s.ask('добавь Create', vanilla.id, {});
+  assert.equal(nb.kind, 'build');
+  assert.equal(nb.build.loader, 'fabric');
+  assert.ok(nb.groups.some((g) => g.names.includes('Create Fabric')));
   // смена версии: мод без релиза для 1.20.1 блокирует план
   await s.applyPlan(r.plan.planId);
   const re = await s.planMods(pid, { retarget: { minecraft: '1.20.1' } });

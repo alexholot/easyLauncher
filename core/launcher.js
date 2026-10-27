@@ -48,6 +48,13 @@ function fail(code, message, action) {
   return Object.assign(new Error(message), { code, action });
 }
 
+/** Своя Java из настроек (если файл на месте), иначе подобранная лаунчером. На Windows — javaw без консоли. */
+function javaFor(custom, auto) {
+  if (!custom || !fs.existsSync(custom)) return auto;
+  const w = path.join(path.dirname(custom), 'javaw.exe');
+  return process.platform === 'win32' && /java\.exe$/i.test(custom) && fs.existsSync(w) ? w : custom;
+}
+
 /** Включённые моды сборки (выключенные в папку mods не попадают). */
 const enabled = (m) => m.enabled !== false;
 
@@ -79,6 +86,7 @@ async function applyOptions(gameDir, profile) {
     if (profile.simulation) map.set('simulationDistance', profile.simulation);
     if (profile.fps) map.set('maxFps', profile.fps);
     if (profile.graphics != null) map.set('graphicsMode', profile.graphics);
+    if (profile.fullscreen != null) map.set('fullscreen', profile.fullscreen ? 'true' : 'false');
   }
   await fsp.mkdir(gameDir, { recursive: true });
   await retryFs(() => fsp.writeFile(file, [...map].map(([k, v]) => `${k}:${v}`).join('\n') + '\n'), 'options.txt');
@@ -310,8 +318,10 @@ class Launcher extends EventEmitter {
         ram: Math.max(1, Number(req.ram) || 4),
         server: req.server || null,
         world: req.world && supportsWorld ? req.world : null,
+        extraJvm: req.jvmArgs || [],
+        window: req.window || null,
       });
-      this.startClient(rt.java.javaw, args, { gameDir, profileId: profile.id, mode: req.server ? 'server' : 'play' });
+      this.startClient(javaFor(req.javaPath, rt.java.javaw), args, { gameDir, profileId: profile.id, mode: req.server ? 'server' : 'play' });
       await this.store.updateProfile(profile.id, { lastPlayed: new Date().toISOString() });
       return { ok: true, worldJoin: req.world ? supportsWorld : null };
     }, req.profileId);

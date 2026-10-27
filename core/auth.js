@@ -120,10 +120,12 @@ async function minecraftLogin(msAccessToken) {
       json: { identityToken: `XBL3.0 x=${uhs};${xsts.Token}` },
     });
   } catch (e) {
+    // Mojang ещё не одобрил лаунчер для входа: это не ошибка игрока — объясняем и предлагаем играть без входа
     if (e.status === 403)
-      throw new Error(
-        'Minecraft отклонил приложение: этот Client ID ещё не одобрен Mojang для входа (форма aka.ms/mce-reviewappid).',
-      );
+      throw Object.assign(new Error('Вход через Microsoft пока недоступен: Mojang ещё не одобрил easyLauncher для входа. Твой аккаунт в порядке.'), {
+        code: 'APP_NOT_APPROVED',
+        action: 'Нажми «Играть без входа» — одиночная игра и игра по локальной сети работают. Вход заработает в одном из следующих обновлений.',
+      });
     throw new Error('Minecraft Services: ' + e.message);
   }
   let profile;

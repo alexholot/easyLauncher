@@ -52,6 +52,7 @@ const S = {
   friends: { pid: null, folder: '', link: '' },
   assistant: { open: false, feed: [] },
   ai: null,
+  aiInstall: null, // идущая загрузка модели {label, done, total}
 };
 const sel = () => S.profiles.find((p) => p.id === S.selected) || null;
 const profile = (pid) => S.profiles.find((p) => p.id === pid) || null;
@@ -108,7 +109,31 @@ function errorDialog(e, title = 'Не получилось') {
   if (e.code === 'NO_MEMORY') acts.push('<button class="btn btn-secondary" data-act="build-settings">Память сборки</button>');
   if (e.code === 'WORLD_LOCKED' || e.code === 'SESSION_ACTIVE') acts.push('<button class="btn btn-secondary" data-act="friends">Открыть «С друзьями»</button>');
   if (['PORT_BUSY', 'CRASH', 'MODS', 'EXIT', 'WORLD', 'JAVA'].includes(e.code)) acts.push('<button class="btn btn-ghost" data-log="server">Журнал сервера</button>');
-  dialog(title, `<div class="notice error">${esc(e.message)}</div>${e.action ? `<p>${esc(e.action)}</p>` : ''}<div class="actions">${acts.join('')}<button class="btn btn-ghost" data-close>Закрыть</button></div>`);
+  // лаунчер знает, как исправить (например, недостающий обязательный мод): шаги и одна кнопка
+  if (e.task) acts.unshift('<button class="btn btn-primary" id="err-fix">Исправить</button>');
+  if (e.code === 'MISSING_DEPS' && e.retry) acts.push('<button class="btn btn-ghost" id="err-anyway">Всё равно запустить</button>');
+  dialog(title, `<div class="notice error">${esc(e.message)}</div>${e.action ? `<p>${esc(e.action)}</p>` : ''}${e.task ? `<p><b>Что сделаю:</b></p>${taskSteps(e.task)}${e.task.significant ? '<p class="hint">Перед изменением сделаю копии миров этой сборки.</p>' : ''}<div id="err-progress"></div>` : ''}<div class="actions">${acts.join('')}<button class="btn btn-ghost" data-close>Закрыть</button></div>`, !!e.task);
+  if ($('#err-anyway')) $('#err-anyway').onclick = () => (closeDialog(), e.retry());
+  if (!$('#err-fix')) return;
+  $('#err-fix').onclick = async () => {
+    $('#err-fix').disabled = true;
+    $('#err-progress').innerHTML = '<p class="hint"><span class="spinner"></span>Исправляю…</p>';
+    const off = bridge.onModsProgress((x) => {
+      if ($('#err-progress')) $('#err-progress').innerHTML = `<p class="hint">${x.phase === 'verify' ? 'Проверка файлов…' : `Скачано ${mb(x.done)} из ${mb(x.total)}${x.name ? ' · ' + esc(x.name) : ''}`}</p>`;
+    });
+    try {
+      const r = await call('ai:run', e.task.id);
+      closeDialog();
+      toast(`Исправлено${r.linksAdded?.length ? ': добавлено ' + r.linksAdded.join(', ') : ''}. Жми «Играть».`);
+      await refresh();
+      render();
+    } catch (err) {
+      if ($('#err-progress')) $('#err-progress').innerHTML = `<div class="notice error">${esc(err.message)}</div>`;
+      if ($('#err-fix')) $('#err-fix').disabled = false;
+    } finally {
+      off();
+    }
+  };
 }
 
 document.addEventListener('click', (e) => {
@@ -249,7 +274,7 @@ const TIPS = [
   'Мод можно выключить, не удаляя: переключатель в сборке → «Моды». Он останется в составе, но не загрузится.',
   'Закреплённая версия мода (значок булавки) не меняется при «Обновить всё».',
   'В «Настройках» можно выбрать тему: жидкое стекло, аврору, неон, закат, пиксель или минимализм.',
-  'Ползунок «Затемнение фона» в настройках делает текст на главной читаемее на ярких скриншотах.',
+  'В «Настройках» → «Игра» можно задать размер окна Minecraft или полный экран.',
   '«Установить» в каталоге модов само подбирает подходящую версию и нужные зависимости.',
   'Играть с друзьями можно без своего сервера: «С друзьями» → «Начать сессию» → ссылка-приглашение.',
   'Если игра тормозит, спроси помощника «у меня слабый ноутбук» — он предложит моды на FPS.',
@@ -351,7 +376,7 @@ async function renderPlay(main) {
             </div>
             <p class="hint" style="margin:10px 0 0">${st.lastPlayed || sessions[0] ? `Последняя игра: ${esc(date(st.lastPlayed || sessions[0].at))}` : 'Ещё не запускалась.'}</p>
           </div>
-          ${modded ? `<div class="hcard" id="home-updates"><h2>Обновления модов</h2><p class="hint" style="margin:0">${p.mods ? 'Проверяем…' : 'Модов пока нет.'}</p></div>` : ''}
+          ${modded && S.settings.checkUpdates !== false ? `<div class="hcard" id="home-updates"><h2>Обновления модов</h2><p class="hint" style="margin:0">${p.mods ? 'Проверяем…' : 'Модов пока нет.'}</p></div>` : ''}
           <div class="hcard tip"><div class="tip-head"><h2>${icon('info')}Совет</h2><button class="icon-button" id="tip-next" aria-label="Следующий совет" title="Следующий совет">${icon('refresh')}</button></div><p>${esc(TIPS[tipIdx])}</p></div>
         </aside>
       </div>
@@ -359,7 +384,7 @@ async function renderPlay(main) {
       <section class="home-sec"><div class="sec-head"><h2>Последние скриншоты</h2>${shots.length ? `<button class="btn btn-ghost btn-small" data-q="screenshots">Открыть папку ${icon('arrow')}</button>` : ''}</div>${shotStrip}</section>
       <div class="home-two">
         <section class="home-sec hcard"><div class="sec-head"><h2>История сессий</h2></div>${sessionList}</section>
-        <section class="home-sec hcard" id="home-news"><div class="sec-head"><h2>Новости Minecraft</h2></div><p class="hint">Загружаем…</p></section>
+        ${S.settings.showNews !== false ? '<section class="home-sec hcard" id="home-news"><div class="sec-head"><h2>Новости Minecraft</h2></div><p class="hint">Загружаем…</p></section>' : ''}
       </div>
       ${others.length ? `<section class="home-sec"><div class="sec-head"><h2>Другие сборки</h2><button class="btn btn-ghost btn-small" data-go="builds">Все сборки ${icon('arrow')}</button></div><div class="other-builds">${others
         .slice(0, 8)
@@ -401,8 +426,8 @@ async function renderPlay(main) {
     S.tip = tipIdx + 1;
     $('.tip p').textContent = TIPS[S.tip % TIPS.length];
   };
-  if (modded && p.mods) paintUpdates(p, n);
-  paintNews(n);
+  if (modded && p.mods && S.settings.checkUpdates !== false) paintUpdates(p, n);
+  if (S.settings.showNews !== false) paintNews(n);
 }
 
 /** Карточка «Обновления модов»: проверка идёт после отрисовки, ответ кэшируется в ядре. */
@@ -574,7 +599,7 @@ function loginGate(then) {
     'Как войти в игру',
     `<p>Для Minecraft Java Edition нужен аккаунт Microsoft, на котором куплена игра. Пароль вводится только на сайте Microsoft — лаунчер его не видит.</p>
     <div class="actions"><button class="btn btn-primary" id="gate-login" autofocus>${icon('lock')}Войти через Microsoft</button></div><p class="hint" id="gate-status"></p>
-    <details class="more"><summary>Играть без входа</summary><p class="hint">Офлайн-профиль: только одиночная игра и игра по локальной сети. На серверы с проверкой аккаунтов (и в «С друзьями») без входа попасть нельзя.</p><form id="gate-offline"><label class="field" for="gate-nick">Никнейм</label><input class="input" id="gate-nick" maxlength="16" pattern="[A-Za-z0-9_]{3,16}" required value="${esc(S.settings.nickname || '')}"><p class="hint">3–16 символов: латиница, цифры и _.</p><div class="actions"><button class="btn btn-secondary" type="submit">Играть без входа</button></div></form></details>`,
+    <details class="more" id="gate-more"><summary>Играть без входа</summary><p class="hint">Офлайн-профиль: только одиночная игра и игра по локальной сети. На серверы с проверкой аккаунтов (и в «С друзьями») без входа попасть нельзя.</p><form id="gate-offline"><label class="field" for="gate-nick">Никнейм</label><input class="input" id="gate-nick" maxlength="16" pattern="[A-Za-z0-9_]{3,16}" required value="${esc(S.settings.nickname || '')}"><p class="hint">3–16 символов: латиница, цифры и _.</p><div class="actions"><button class="btn btn-secondary" type="submit">Играть без входа</button></div></form></details>`,
   );
   $('#gate-login').onclick = async () => {
     $('#gate-status').textContent = 'Ждём вход в окне Microsoft…';
@@ -584,7 +609,9 @@ function loginGate(then) {
       paintChrome();
       then();
     } catch (e) {
-      $('#gate-status').textContent = e.message;
+      $('#gate-status').textContent = e.message + (e.action ? ' ' + e.action : '');
+      // вход недоступен не по вине игрока — сразу показываем игру без входа
+      if (e.code === 'APP_NOT_APPROVED' && $('#gate-more')) $('#gate-more').open = true;
     }
   };
   $('#gate-offline').onsubmit = async (e) => {
@@ -600,16 +627,18 @@ function loginGate(then) {
   };
 }
 
-async function play(pid, world = null, server = null) {
+async function play(pid, world = null, server = null, skipLinks = false) {
   if (!S.auth.account && !S.settings.offlineOk) return loginGate(() => play(pid, world, server));
   S.busy = { kind: 'play', pid };
   S.stage = { label: 'Проверка' };
   render();
   try {
-    const r = await call('mc:play', { profileId: pid, world, server });
+    const r = await call('mc:play', { profileId: pid, world, server, skipLinks });
     if (world && r.worldJoin === false) toast('Эта версия Minecraft не умеет входить сразу в мир — откроется главное меню.');
   } catch (e) {
-    if (e.code !== 'CANCELLED') errorDialog(e, 'Игра не запустилась');
+    // «Всё равно запустить» — если игрок уверен, что проверка связей ошиблась
+    if (e.code === 'MISSING_DEPS') e.retry = () => play(pid, world, server, true);
+    if (e.code !== 'CANCELLED') errorDialog(e, e.code === 'MISSING_DEPS' ? 'Сборка не запустится' : 'Игра не запустилась');
   } finally {
     S.busy = null;
     S.stage = null;
@@ -683,13 +712,39 @@ function sessionAfterGameDialog() {
 /** Разбор вылета — правилами (работает и без модели помощника). */
 async function crashDialog(ev) {
   let body = '';
+  let task = null;
   try {
     const r = await call('ai:ask', ev.crash, ev.profileId);
     const f = r.findings || [];
     body = f.map((x) => `<div class="notice ${x.level === 'error' ? 'error' : ''}"><strong>${esc(x.title)}</strong>${esc(x.fix)}</div>`).join('') || (r.needMore ? `<p>${esc(r.needMore)}</p>` : '');
     if (r.guess) body += `<div class="notice"><strong>${r.guess.confident ? 'Вероятная причина' : 'Предположение'}</strong>${esc(r.guess.text)}</div>`;
+    // помощник знает, как это исправить: показываем, что сделает, — одна кнопка
+    if (r.task) {
+      task = r.task;
+      body += `<p><b>Могу исправить сам:</b></p>${taskSteps(task)}${task.significant ? '<p class="hint">Перед изменением сделаю копии миров этой сборки.</p>' : ''}<div id="fix-progress"></div>`;
+    }
   } catch {}
-  dialog(`Minecraft закрылся с ошибкой (код ${ev.code})`, `${body || '<p>Причину по журналу определить не удалось.</p>'}<div class="actions"><button class="btn btn-secondary" data-log="client">Журнал игры</button><button class="btn btn-ghost" data-close>Закрыть</button></div>`, true);
+  dialog(`Minecraft закрылся с ошибкой (код ${ev.code})`, `${body || '<p>Причину по журналу определить не удалось.</p>'}<div class="actions">${task ? '<button class="btn btn-primary" id="crash-fix">Исправить</button>' : ''}<button class="btn btn-secondary" data-log="client">Журнал игры</button><button class="btn btn-ghost" data-close>Закрыть</button></div>`, true);
+  if (!task) return;
+  $('#crash-fix').onclick = async () => {
+    $('#crash-fix').disabled = true;
+    $('#fix-progress').innerHTML = '<p class="hint"><span class="spinner"></span>Исправляю…</p>';
+    const off = bridge.onModsProgress((x) => {
+      if ($('#fix-progress')) $('#fix-progress').innerHTML = `<p class="hint">${x.phase === 'verify' ? 'Проверка файлов…' : `Скачано ${mb(x.done)} из ${mb(x.total)}${x.name ? ' · ' + esc(x.name) : ''}`}</p>`;
+    });
+    try {
+      await call('ai:run', task.id);
+      closeDialog();
+      toast('Исправлено. Запусти игру ещё раз.');
+      await refresh();
+      render();
+    } catch (e) {
+      if ($('#fix-progress')) $('#fix-progress').innerHTML = `<div class="notice error">${esc(e.message)}</div>`;
+      if ($('#crash-fix')) $('#crash-fix').disabled = false;
+    } finally {
+      off();
+    }
+  };
 }
 
 // ---------- «Сборки» ----------
@@ -1184,6 +1239,7 @@ function planDialog(plan, title, ctx = {}) {
         const r = await call('mods:apply', plan.planId, imports);
         closeDialog();
         toast(r.backups?.length ? `Сборка обновлена. Копии миров: ${r.backups.length}` : 'Сборка обновлена');
+        missingWarning(r.missing);
         S.worldsCache = {};
         markInstalled(plan);
         await refresh();
@@ -1199,6 +1255,13 @@ function planDialog(plan, title, ctx = {}) {
     };
   };
   render_();
+}
+
+/** Проверка файлов после установки нашла обязательный мод, о котором каталог не знает. */
+function missingWarning(missing) {
+  if (!missing?.length) return;
+  const list = missing.map((m) => `«${m.by.map((b) => b.name).join('», «')}» требует «${m.id}»`).join('; ');
+  dialog('Не хватает обязательного мода', `<div class="notice">${esc(list)}. Каталог об этом не сообщил — это видно только по файлу мода.</div><p>При нажатии «Играть» лаунчер предложит исправить: найдёт недостающий мод в каталоге или уберёт тот, которому он нужен.</p><div class="actions"><button class="btn btn-primary" data-close>Понятно</button></div>`);
 }
 
 // ---------- «Моды»: каталог ----------
@@ -1389,6 +1452,7 @@ async function installOne(source, id, pid) {
       markInstalled(r.plan);
       const deps = r.plan.changes.filter((c) => c.dependencyOf).map((c) => c.name);
       toast(`Установлено в «${profile(pid).name}»${deps.length ? `. Зависимости: ${deps.join(', ')}` : ''}`);
+      missingWarning(r.missing);
       await refresh();
     } else planDialog(r.plan, 'Установка: нужно решение', { pid, request: { add: [{ source, projectId: id }] } });
   } catch (e) {
@@ -1854,12 +1918,15 @@ async function renderSettings(main) {
     <div class="actions"><button class="btn btn-ghost btn-small" id="ap-reset">${icon('refresh')}Вернуть стандартный вид</button></div></section>
   <section class="panel"><h2>Фон главного экрана</h2><div class="segmented" role="group" style="margin-top:10px"><button data-bg="default" aria-pressed="${bgMode === 'default'}">Стандартный</button><button data-bg="custom" aria-pressed="${bgMode === 'custom'}">Своя картинка</button><button data-bg="profile" aria-pressed="${bgMode === 'profile'}">Обложка или скриншот сборки</button></div>
     <p class="hint">${bgMode === 'profile' ? 'Обложка выбранной сборки, а если её нет — последний скриншот из этой сборки. Без скриншотов — стандартный фон.' : bgMode === 'custom' ? 'Картинка копируется в папку лаунчера.' : 'Нейтральный фон. Лаунчер не подставляет случайные картинки.'}</p>
-    ${bgMode === 'custom' ? '<div class="actions"><button class="btn btn-secondary btn-small" id="bg-pick">Выбрать другую картинку</button></div>' : ''}
-    <label class="field" for="dim">Затемнение фона — для читаемости текста</label><input type="range" id="dim" min="0.2" max="0.9" step="0.05" value="${s.dim}" style="width:100%;accent-color:var(--accent)"></section>
-  <section class="panel"><h2>Память по умолчанию</h2><div class="form-grid"><div><label class="field" for="st-ram">Для игры</label>${ramField('st-ram', s.ram, { max: Math.max(2, (S.sys.totalRamGiB || 8) - 2), presets: [2, 4, 6, 8, 12] })}</div><div><label class="field" for="st-sram">Для сервера (с друзьями)</label>${ramField('st-sram', s.serverRam, { max: Math.max(1, (S.sys.totalRamGiB || 8) - 4), presets: [2, 3, 4, 6] })}</div></div><p class="hint">ОЗУ компьютера: ${S.sys.totalRamGiB || '?'} ГБ. Обычно хватает 4–6 ГБ; большим сборкам — 8–12. Слишком много памяти не ускоряет игру. У сборки может быть своё значение.</p></section></div>
-  <div><section class="panel"><h2>Помощник</h2><p class="hint">Необязателен: игра, моды, миры и игра с друзьями работают без него.</p><div id="ai-box"><p class="hint">Проверяем…</p></div></section>
-  <section class="panel"><h2>Файлы и соглашения</h2><p class="hint">Minecraft EULA: ${s.eula ? 'принята' : 'ещё не принята (спросим при первом запуске сервера)'}.</p><div class="actions"><button class="btn btn-ghost btn-small" id="root">${icon('folder')}Папка easyLauncher</button></div><p class="hint">easyLauncher ${esc(S.sys.version || '')} · не связан с Mojang и Microsoft.</p></section>
-  <section class="panel"><details><summary style="cursor:pointer"><b>Для разработчика</b></summary><p class="hint">Игрокам здесь ничего настраивать не нужно${s.builtIn?.backend || s.builtIn?.cfProxy ? ': значения заданы в сборке' : ''}.</p><label class="field" for="st-backend">Сервер приглашений easyLauncher</label><input class="input" id="st-backend" value="${esc(s.builtIn?.backend ? '' : s.backend)}" placeholder="${s.builtIn?.backend ? 'как в сборке' : 'https://rooms.example.com'}"><label class="field" for="st-cf">Прокси каталога CurseForge</label><input class="input" id="st-cf" value="${esc(s.builtIn?.cfProxy ? '' : s.cfProxy || '')}" placeholder="${s.builtIn?.cfProxy ? 'как в сборке' : 'https://…workers.dev'}"><div class="actions"><button class="btn btn-secondary btn-small" id="dev-save">Сохранить</button></div></details></section></div></div></div>`;
+    ${bgMode === 'custom' ? '<div class="actions"><button class="btn btn-secondary btn-small" id="bg-pick">Выбрать другую картинку</button></div>' : ''}</section>
+  <section class="panel"><h2>Память по умолчанию</h2><div class="form-grid"><div><label class="field" for="st-ram">Для игры</label>${ramField('st-ram', s.ram, { max: Math.max(2, (S.sys.totalRamGiB || 8) - 2), presets: [2, 4, 6, 8, 12] })}</div><div><label class="field" for="st-sram">Для сервера (с друзьями)</label>${ramField('st-sram', s.serverRam, { max: Math.max(1, (S.sys.totalRamGiB || 8) - 4), presets: [2, 3, 4, 6] })}</div></div><p class="hint">ОЗУ компьютера: ${S.sys.totalRamGiB || '?'} ГБ. Обычно хватает 4–6 ГБ; большим сборкам — 8–12. Слишком много памяти не ускоряет игру. У сборки может быть своё значение.</p></section>
+</div>
+  <div>${gameSettingsHtml(s)}
+  ${launcherSettingsHtml(s)}
+  ${javaSettingsHtml(s)}
+  <section class="panel"><h2>Помощник</h2><p class="hint">Необязателен: игра, моды, миры и игра с друзьями работают без него.</p><div id="ai-box"><p class="hint">Проверяем…</p></div></section>
+  <section class="panel"><h2>Хранилище</h2><p class="hint" id="st-storage">Считаем место…</p><div class="actions"><button class="btn btn-secondary btn-small" id="st-clean">${icon('trash')}Очистить неиспользуемые моды</button><button class="btn btn-ghost btn-small" id="root">${icon('folder')}Папка easyLauncher</button></div><p class="hint">Очистка удаляет из общего кэша файлы модов, которых нет ни в одной сборке и ни в одном прежнем составе (для отката). Миры и сборки не трогаются.</p></section>
+  <section class="panel"><h2>О программе</h2><p class="hint">easyLauncher ${esc(S.sys.version || '')} · не связан с Mojang и Microsoft. Minecraft EULA: ${s.eula ? 'принята' : 'ещё не принята (спросим при первом запуске сервера)'}.</p><div class="actions"><button class="btn btn-ghost btn-small" id="st-logs">${icon('folder')}Журнал лаунчера</button></div><p class="hint">Если что-то не работает — пришли файл launcher.log из этой папки: в нём записаны ошибки.</p></section></div></div></div>`;
   hydrate(main);
   $$('.theme-card[data-style]').forEach((b) => (b.onclick = () => setAppearance({ style: b.dataset.style, accent: STYLES.find((x) => x[0] === b.dataset.style)[3], ...(b.dataset.style === 'pixel' ? { radius: 'sharp', font: 'minecraft' } : { radius: 'normal', font: 'system' }) })));
   $$('[data-accent]').forEach((b) => (b.onclick = () => setAppearance({ accent: b.dataset.accent })));
@@ -1902,24 +1969,11 @@ async function renderSettings(main) {
       if (r) S.settings = r;
       S.background = await call('bg:for', S.selected);
     };
-  // видно сразу, пока тянешь; сохраняется, когда ползунок отпущен
-  $('#dim').oninput = (e) => document.documentElement.style.setProperty('--dim', e.target.value);
-  $('#dim').onchange = async (e) => {
-    S.settings = await call('settings:set', { dim: Number(e.target.value) });
-    document.documentElement.style.setProperty('--dim', S.settings.dim);
-  };
+  wireExtraSettings();
   wireRam('st-ram', Math.max(2, (S.sys.totalRamGiB || 8) - 2), async (v) => ((S.settings = await call('settings:set', { ram: v })), toast(v ? `Память для игры: ${v} ГБ` : 'Память для игры: автоматически')));
   wireRam('st-sram', Math.max(1, (S.sys.totalRamGiB || 8) - 4), async (v) => ((S.settings = await call('settings:set', { serverRam: v })), toast(v ? `Память для сервера: ${v} ГБ` : 'Память для сервера: автоматически')));
   $('#root').onclick = () => call('open:folder', 'root');
-  $('#dev-save').onclick = async () => {
-    try {
-      S.settings = await call('settings:set', { backend: $('#st-backend').value.trim(), cfProxy: $('#st-cf').value.trim() });
-      S.mods.cfAvailable = null;
-      toast('Сохранено');
-    } catch (e) {
-      toast(e.message);
-    }
-  };
+  $('#st-logs').onclick = () => call('open:folder', 'logs');
   S.ai = await call('ai:status').catch(() => null);
   if ($('#ai-box')) {
     $('#ai-box').innerHTML = aiBox(S.ai);
@@ -1927,9 +1981,110 @@ async function renderSettings(main) {
   }
 }
 
+// ---------- расширенные настройки: игра, лаунчер, Java, хранилище ----------
+const segm = (name, cur, opts) => `<div class="segmented" role="group">${opts.map(([v, l]) => `<button type="button" data-set="${name}" data-val="${esc(v)}" aria-pressed="${String(cur) === String(v)}">${l}</button>`).join('')}</div>`;
+const selectOpts = (id, cur, opts) => `<select class="input" id="${id}">${opts.map(([v, l]) => `<option value="${esc(v)}" ${String(cur ?? '') === String(v) ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+
+function gameSettingsHtml(s) {
+  const w = s.window || {};
+  const mode = !s.window ? 'auto' : w.fullscreen ? 'full' : 'window';
+  const o = s.options || {};
+  const dist = [['', 'Как в игре'], ...[4, 6, 8, 10, 12, 16, 20, 24, 32].map((n) => [n, `${n} чанков`])];
+  return `<section class="panel"><h2>Игра</h2>
+    <div class="option-row"><span>Окно игры<small>Размер окна Minecraft при запуске</small></span>${segm('winmode', mode, [['auto', 'Как в игре'], ['full', 'Полный экран'], ['window', 'Своё окно']])}</div>
+    ${mode === 'window' ? `<div class="row" style="margin:8px 0 0"><input class="input" id="st-w" type="number" min="640" max="7680" value="${w.width || 1280}" style="max-width:110px" aria-label="Ширина"><span class="hint" style="margin:0">×</span><input class="input" id="st-h" type="number" min="480" max="4320" value="${w.height || 720}" style="max-width:110px" aria-label="Высота"><button class="btn btn-secondary btn-small" id="st-wsave">Сохранить размер</button></div>` : ''}
+    <h3 style="margin:18px 0 4px;font-size:14px">Графика по умолчанию</h3><p class="hint" style="margin-top:0">Применяется при запуске игры; то, что ты поменяешь в самой игре, тоже сохранится. «Как в игре» — не трогать.</p>
+    <div class="form-grid"><div><label class="field" for="st-render">Дальность прорисовки</label>${selectOpts('st-render', o.render, dist)}</div><div><label class="field" for="st-sim">Дальность симуляции</label>${selectOpts('st-sim', o.simulation, dist.filter(([v]) => v === '' || v <= 16))}</div>
+    <div><label class="field" for="st-fps">Ограничение FPS</label>${selectOpts('st-fps', o.fps, [['', 'Как в игре'], [30, '30'], [60, '60'], [120, '120'], [144, '144'], [240, '240'], [260, 'Без ограничения']])}</div><div><label class="field" for="st-gfx">Качество графики</label>${selectOpts('st-gfx', o.graphics, [['', 'Как в игре'], [0, 'Быстрая'], [1, 'Детальная'], [2, 'Великолепная']])}</div></div></section>`;
+}
+
+function launcherSettingsHtml(s) {
+  return `<section class="panel"><h2>Лаунчер</h2>
+    <div class="option-row"><span>Когда игра запущена<small>Что делать с окном лаунчера</small></span>${segm('afterLaunch', s.afterLaunch, [['keep', 'Оставить'], ['minimize', 'Свернуть'], ['hide', 'Спрятать до выхода']])}</div>
+    <div class="option-row"><span>Новости Minecraft на главной</span>${segm('showNews', s.showNews, [[true, 'Показывать'], [false, 'Скрыть']])}</div>
+    <div class="option-row"><span>Проверять обновления модов<small>На главной — сколько модов сборки можно обновить</small></span>${segm('checkUpdates', s.checkUpdates, [[true, 'Да'], [false, 'Нет']])}</div></section>`;
+}
+
+function javaSettingsHtml(s) {
+  return `<section class="panel"><h2>Java</h2><p class="hint">Обычно ничего менять не нужно: лаунчер сам скачивает подходящую Java от Mojang для каждой версии игры.</p>
+    <details class="more" ${s.javaPath || s.jvmArgs ? 'open' : ''}><summary>Для опытных игроков</summary>
+    <label class="field">Своя Java</label><div class="row"><span class="hint" style="margin:0;flex:1;word-break:break-all">${s.javaPath ? esc(s.javaPath) : 'Автоматически (рекомендуется)'}</span><button class="btn btn-secondary btn-small" id="st-java">Выбрать файл…</button>${s.javaPath ? '<button class="btn btn-ghost btn-small" id="st-java-auto">Автоматически</button>' : ''}</div><p class="hint">Версия Java должна подходить игре: 1.20.5+ — Java 21, 1.17–1.20.4 — Java 17, старее — Java 8.</p>
+    <label class="field" for="st-jvm">Аргументы Java</label><div class="row"><input class="input" id="st-jvm" value="${esc(s.jvmArgs)}" placeholder="например -XX:+UseZGC" style="flex:1"><button class="btn btn-secondary btn-small" id="st-jvm-save">Сохранить</button></div><p class="hint">Добавляются к стандартным. Память задаётся выше, не через -Xmx.</p></details></section>`;
+}
+
+/** Обработчики расширенных настроек (вызываются из renderSettings). */
+function wireExtraSettings() {
+  const save = async (patch, msg = 'Сохранено') => {
+    try {
+      S.settings = await call('settings:set', patch);
+      toast(msg);
+      const y = $('#main').scrollTop;
+      await renderSettings($('#main'));
+      $('#main').scrollTop = y;
+    } catch (e) {
+      toast(e.message);
+    }
+  };
+  $$('[data-set]').forEach(
+    (b) =>
+      (b.onclick = () => {
+        const k = b.dataset.set;
+        const v = b.dataset.val;
+        if (k === 'winmode') return save({ window: v === 'auto' ? null : v === 'full' ? { fullscreen: true } : { width: 1280, height: 720, fullscreen: false } });
+        save({ [k]: v === 'true' ? true : v === 'false' ? false : v });
+      }),
+  );
+  if ($('#st-wsave')) $('#st-wsave').onclick = () => save({ window: { width: Number($('#st-w').value), height: Number($('#st-h').value), fullscreen: false } }, 'Размер окна сохранён');
+  const gfx = () => {
+    const n = (id) => ($('#' + id).value === '' ? undefined : Number($('#' + id).value));
+    const o = { render: n('st-render'), simulation: n('st-sim'), fps: n('st-fps'), graphics: n('st-gfx') };
+    save({ options: Object.values(o).some((x) => x !== undefined) ? o : null }, 'Графика сохранена — применится при запуске игры');
+  };
+  ['st-render', 'st-sim', 'st-fps', 'st-gfx'].forEach((id) => ($('#' + id).onchange = gfx));
+  $('#st-java').onclick = async () => {
+    try {
+      const r = await call('java:pick');
+      if (r) save({}, 'Своя Java выбрана');
+    } catch (e) {
+      toast(e.message);
+    }
+  };
+  if ($('#st-java-auto')) $('#st-java-auto').onclick = () => save({ javaPath: '' }, 'Java подбирается автоматически');
+  $('#st-jvm-save').onclick = () => save({ jvmArgs: $('#st-jvm').value }, 'Аргументы Java сохранены');
+  call('storage:info')
+    .then((x) => $('#st-storage') && ($('#st-storage').textContent = `Файлы игры (версии, библиотеки, ресурсы, Java): ${mb(x.game)}. Кэш модов: ${mb(x.modCache)}.`))
+    .catch(() => $('#st-storage') && ($('#st-storage').textContent = 'Не удалось посчитать место.'));
+  $('#st-clean').onclick = async () => {
+    $('#st-clean').disabled = true;
+    try {
+      const r = await call('storage:clean');
+      toast(r.freed ? `Освобождено ${mb(r.freed)}` : 'Лишних файлов нет');
+      save({}, r.freed ? `Освобождено ${mb(r.freed)}` : 'Лишних файлов нет');
+    } catch (e) {
+      toast(e.message);
+      $('#st-clean').disabled = false;
+    }
+  };
+}
+
+/** Прогресс загрузки модели — для блока в «Настройках», где бы ни был игрок, пока она идёт. */
+function aiProgressHtml(x) {
+  const pct = x.total ? Math.floor((x.done / x.total) * 100) : 0;
+  return `<p><b>Скачивается ${esc(x.label)}</b></p><p class="hint" id="ai-prog">${mb(x.done)} из ${mb(x.total)} (${pct}%)</p><div class="bar"><span id="ai-bar" style="width:${pct}%"></span></div><p class="hint">Можно переходить в другие разделы — загрузка продолжится. Файлы проверяются по SHA-256.</p>`;
+}
+// загрузка модели идёт в главном процессе; окно только показывает её ход
+bridge.onAiProgress((x) => {
+  S.aiInstall = x;
+  const pct = x.total ? Math.floor((x.done / x.total) * 100) : 0;
+  if ($('#ai-prog')) $('#ai-prog').textContent = `${mb(x.done)} из ${mb(x.total)} (${pct}%)`;
+  if ($('#ai-bar')) $('#ai-bar').style.width = pct + '%';
+});
+
 function aiBox(ai) {
   if (!ai) return '<p class="hint">Состояние помощника недоступно.</p>';
   if (!ai.supported) return '<p>Для этой системы нет готового движка. Помощник работает по правилам: каталог, зависимости и известные ошибки.</p>';
+  const inst = ai.installing || S.aiInstall;
+  if (inst) return aiProgressHtml(inst);
   if (!ai.installed)
     return `<p>Сейчас помощник работает по правилам. Локальная модель лучше понимает свободные запросы. Её скачивают один раз; дальше она работает без интернета и без ключей.</p><label class="field" for="ai-model">Модель</label><select class="input" id="ai-model">${ai.models.map((m) => `<option value="${esc(m.id)}" ${m.id === aiPick(ai) ? 'selected' : ''}>${esc(m.label)}${m.note ? ' — ' + esc(m.note) : ''} · от ${m.ramGb} ГБ ОЗУ${ai.totalRamGb && ai.totalRamGb < m.ramGb ? ' (мало памяти)' : ''}${m.id === aiPick(ai) ? ' — рекомендуется' : ''}</option>`).join('')}</select><p class="hint">Модели на 4B (Qwen3 4B, Gemma 3 4B) отвечают заметно лучше, но весят около 2,5 ГБ и думают дольше. Модели меньше 1B быстрые, но хуже понимают русский.</p><div class="actions"><button class="btn btn-secondary btn-small" id="ai-size">Узнать размер и установить</button></div><div id="ai-out"></div><p class="hint">Модель загружается в память, только когда ты обращаешься к помощнику, и выгружается перед запуском игры.</p>`;
   return `${/0\.5B|0\.8B/.test(ai.model?.label || '') ? '<div class="notice">Установлена маленькая модель: она быстрая, но часто ошибается в русском. Для лучших ответов удали её и поставь Qwen2.5 1.5B.</div>' : ''}<p>Установлено: ${esc(ai.model?.label || '')} (${mb(ai.model?.size || 0)}), движок llama.cpp ${esc(ai.runtime?.tag || '')}.</p><p class="hint">${ai.running ? `Модель загружена: ${ai.rssMb} МБ ОЗУ.` : 'Модель сейчас не загружена и память не занимает.'}</p><div class="actions">${ai.running ? '<button class="btn btn-secondary btn-small" id="ai-unload">Выгрузить</button>' : ''}<button class="btn btn-ghost btn-small" id="ai-remove">Удалить модель</button></div>`;
@@ -1945,34 +2100,45 @@ function wireAiBox() {
   if ($('#ai-size'))
     $('#ai-size').onclick = async () => {
       const out = $('#ai-out');
+      $('#ai-size').disabled = true;
       out.innerHTML = '<p class="hint">Узнаём размер…</p>';
       try {
         const plan = await call('ai:plan', $('#ai-model').value);
-        out.innerHTML = `<p>Будет скачано ${mb(plan.totalBytes)}: движок (${mb(plan.runtime.size)}) и модель ${esc(plan.model.file)} (${mb(plan.model.size)}). Файлы проверяются по SHA-256.</p>${plan.model.terms ? `<div class="notice">Модели Gemma распространяются по <a href="#" data-external="${esc(plan.model.terms)}">условиям использования Gemma</a> от Google (не Apache-2.0). Устанавливая модель, ты соглашаешься с ними.</div>` : ''}<div class="actions"><button class="btn btn-primary btn-small" id="ai-go">Скачать и установить</button></div><p class="hint" id="ai-prog"></p>`;
-        $('#ai-go').onclick = async () => {
-          $('#ai-go').disabled = true;
-          const off = bridge.onAiProgress((p) => ($('#ai-prog').textContent = `${mb(p.done)} из ${mb(p.total)}`));
-          try {
-            await call('ai:install', plan);
-            reload();
-          } catch (e) {
-            $('#ai-prog').textContent = e.message;
-            $('#ai-go').disabled = false;
-          } finally {
-            off();
-          }
-        };
+        if (!$('#ai-out')) return;
+        $('#ai-out').innerHTML = `<p>Будет скачано ${mb(plan.totalBytes)}: движок (${mb(plan.runtime.size)}) и модель ${esc(plan.model.file)} (${mb(plan.model.size)}). Файлы проверяются по SHA-256.</p>${plan.model.terms ? `<div class="notice">Модели Gemma распространяются по <a href="#" data-external="${esc(plan.model.terms)}">условиям использования Gemma</a> от Google (не Apache-2.0). Устанавливая модель, ты соглашаешься с ними.</div>` : ''}<div class="actions"><button class="btn btn-primary btn-small" id="ai-go">Скачать и установить</button></div>`;
+        $('#ai-go').onclick = () => installAi(plan, reload);
       } catch (e) {
-        out.innerHTML = `<div class="notice error">${esc(e.message)}</div>`;
+        if ($('#ai-out')) $('#ai-out').innerHTML = `<div class="notice error">${esc(e.message)}</div>`;
+      } finally {
+        if ($('#ai-size')) $('#ai-size').disabled = false;
       }
     };
   if ($('#ai-unload')) $('#ai-unload').onclick = async () => (await call('ai:unload'), reload());
   if ($('#ai-remove')) $('#ai-remove').onclick = async () => (await call('ai:uninstall'), reload());
 }
 
-/** Рекомендуемая модель: на компьютерах от 12 ГБ ОЗУ — Qwen3 4B, иначе лёгкая по умолчанию. */
+/**
+ * Загрузка модели: вызов живёт отдельно от отрисовки, поэтому переход в другой раздел её не сбивает.
+ * Блок сразу переходит в «скачивается» — второй раз нажать «Скачать» нельзя (и ядро второй загрузки не начнёт).
+ */
+async function installAi(plan, reload) {
+  if (S.aiInstall) return;
+  S.aiInstall = { label: plan.model.label, done: 0, total: plan.totalBytes };
+  if ($('#ai-box')) $('#ai-box').innerHTML = aiProgressHtml(S.aiInstall);
+  try {
+    await call('ai:install', plan);
+    toast(`Модель ${plan.model.label} установлена — помощник стал умнее.`);
+  } catch (e) {
+    toast('Модель не установилась: ' + e.message);
+  } finally {
+    S.aiInstall = null;
+    reload();
+  }
+}
+
+/** Рекомендуемая модель: на компьютерах от 8 ГБ ОЗУ — Qwen3 4B (заметно лучше понимает русский), иначе лёгкая. */
 function aiPick(ai) {
-  if (ai.totalRamGb >= 12 && ai.models.some((m) => m.id === 'qwen3-4b')) return 'qwen3-4b';
+  if (ai.totalRamGb >= 8 && ai.models.some((m) => m.id === 'qwen3-4b')) return 'qwen3-4b';
   return ai.models.find((m) => m.default)?.id;
 }
 
@@ -2001,15 +2167,19 @@ function openAssistant() {
   S.assistant.open = true;
   $('#assistant-panel').hidden = false;
   $('#assistant-toggle').setAttribute('aria-expanded', 'true');
-  const p = sel();
+  assistantNote();
+  paintFeed();
+  $('#assistant-input').focus();
+}
+/** Подпись панели: чем понимает запросы и для какой сборки (после создания новой — уже для неё). */
+function assistantNote() {
   call('ai:status')
     .then((ai) => {
       S.ai = ai;
-      $('#assistant-note').textContent = `${ai?.installed ? 'Локальная модель установлена.' : 'Работает по правилам, без нейросети: модель можно установить в «Настройках».'} Без интернета и ключей.${p ? ` Запросы — для сборки «${p.name}».` : ''}`;
+      const p = sel();
+      $('#assistant-note').textContent = `${ai?.installed ? 'Локальная модель установлена.' : 'Работает по правилам, без нейросети: модель можно установить в «Настройках».'} Без ключей; моды подбирает по каталогу Modrinth.${p ? ` Выбрана сборка «${p.name}»${p.loader === 'vanilla' ? ' без модов — для модов помощник соберёт новую' : ': моды поставит в неё или в новую сборку — спросит, куда'}.` : ''}`;
     })
     .catch(() => {});
-  paintFeed();
-  $('#assistant-input').focus();
 }
 function closeAssistant() {
   S.assistant.open = false;
@@ -2021,7 +2191,7 @@ $('#assistant-close').onclick = closeAssistant;
 
 function paintFeed() {
   const feed = $('#assistant-feed');
-  feed.innerHTML = S.assistant.feed.length ? S.assistant.feed.map((m, i) => (m.user ? `<div class="bubble user">${esc(m.text.length > 600 ? m.text.slice(0, 600) + '…' : m.text)}</div>` : `<div class="bubble" data-i="${i}">${m.html}</div>`)).join('') : '<p class="hint">Спроси, какие моды поставить, как поднять FPS, или вставь текст ошибки. Изменения сборки помощник только предлагает — применяешь их ты.</p>';
+  feed.innerHTML = S.assistant.feed.length ? S.assistant.feed.map((m, i) => (m.user ? `<div class="bubble user">${esc(m.text.length > 600 ? m.text.slice(0, 600) + '…' : m.text)}</div>` : `<div class="bubble" data-i="${i}">${m.html}</div>`)).join('') : '<p class="hint">Попроси собрать новую сборку («сделай сборку с зомби и оружием»), добавить моды, поднять FPS или вставь текст ошибки. Помощник покажет, что сделает, и сделает всё сам по одной кнопке.</p>';
   hydrate(feed);
   S.assistant.feed.forEach((m, i) => m.wire && m.wire($(`[data-i="${i}"]`, feed)));
   feed.scrollTop = feed.scrollHeight;
@@ -2031,15 +2201,16 @@ function pushAnswer(html, wire) {
   paintFeed();
 }
 
-async function ask(text) {
+/** Запрос к помощнику. answers — ответы на уточняющие вопросы (тогда в ленте показывается их краткий итог). */
+async function ask(text, answers = null, summary = '') {
   if (!text.trim()) return;
   const p = sel();
   if (!p) return toast('Сначала создай сборку.');
-  S.assistant.feed.push({ user: true, text });
-  pushAnswer('<p class="hint"><span class="spinner"></span>Думаю…</p>');
+  S.assistant.feed.push({ user: true, text: answers ? summary : text });
+  pushAnswer(`<p class="hint"><span class="spinner"></span>${answers ? 'Подбираю моды и проверяю совместимость… Обычно до минуты, у большой сборки — дольше.' : 'Думаю…'}</p>`);
   const pending = S.assistant.feed.length - 1;
   try {
-    const r = await call('ai:ask', text, p.id);
+    const r = await call('ai:ask', text, p.id, answers);
     S.assistant.feed.splice(pending, 1);
     renderAnswer(r, p);
   } catch (e) {
@@ -2047,27 +2218,132 @@ async function ask(text) {
     pushAnswer(`<div class="notice error">${esc(e.message)}</div>`);
   }
 }
+/** Что сделает помощник: шаги задания (длинный список — свёрнут). */
+function taskSteps(task) {
+  const li = (s) => `<li>${icon('check')}<span>${esc(s)}</span></li>`;
+  const head = task.steps.slice(0, 8);
+  const rest = task.steps.slice(8);
+  return `<ul class="plan-steps">${head.map(li).join('')}</ul>${rest.length ? `<details class="more"><summary>И ещё ${rest.length}</summary><ul class="plan-steps">${rest.map(li).join('')}</ul></details>` : ''}`;
+}
+
+/**
+ * Кнопка задания помощника: выполняет всё одним вызовом ai:run (создание сборки, моды, память, графика)
+ * и показывает прогресс загрузки. Состояние хранится в ответе r — лента перерисовывается целиком.
+ */
+function wireTask(el, r, label, done) {
+  const box = $('[data-task]', el);
+  if (!box) return;
+  if (r.taskState === 'done') return (box.innerHTML = `<p class="hint">${icon('check')} Сделано</p>`);
+  const btn = $('[data-a="run"]', box);
+  if (r.taskState === 'running') btn.disabled = true;
+  btn.onclick = async () => {
+    r.taskState = 'running';
+    btn.disabled = true;
+    btn.textContent = 'Делаю…';
+    const prog = () => {
+      const bubble = $(`[data-i="${S.assistant.feed.findIndex((m) => m.r === r)}"]`);
+      return bubble && $('[data-task] [data-progress]', bubble);
+    };
+    const off = bridge.onModsProgress((x) => {
+      const pe = prog();
+      if (pe) pe.innerHTML = `<p class="hint">${x.phase === 'verify' ? 'Проверка файлов…' : x.phase === 'done' ? 'Готово' : `Скачано ${mb(x.done)} из ${mb(x.total)}${x.name ? ' · ' + esc(x.name) : ''}`}</p><div class="bar"><span style="width:${x.total ? Math.floor((x.done / x.total) * 100) : 100}%"></span></div>`;
+    });
+    try {
+      const res = await call('ai:run', r.task.id);
+      r.taskState = 'done';
+      S.worldsCache = {};
+      await refresh();
+      render();
+      assistantNote();
+      pushAnswer(`<p>${esc(done(res))}</p>`);
+    } catch (e) {
+      r.taskState = null;
+      btn.disabled = false;
+      btn.textContent = label;
+      const pe = prog();
+      if (pe) pe.innerHTML = `<div class="notice error">${esc(e.message)}${e.action ? ' ' + esc(e.action) : ''}</div>`;
+    } finally {
+      off();
+    }
+  };
+}
+const taskBox = (label, extra = '') => `<div data-task><div class="actions"><button class="btn btn-primary btn-small" data-a="run">${esc(label)}</button>${extra}</div><div data-progress></div></div>`;
+const linksText = (res) => `${res.linksAdded?.length ? ` Проверил файлы модов и добавил нужное, о чём каталог не знал: ${res.linksAdded.join(', ')}.` : ''}${res.linksRemoved?.length ? ` Убрал моды, которым не нашлось обязательной библиотеки: ${res.linksRemoved.join(', ')}.` : ''}`;
+const doneText = (res) => (res.created ? 'Готово! Сборка создана и выбрана — жми «Играть». Первый запуск скачает игру и загрузчик, это займёт несколько минут.' : `Готово, сборка обновлена.${res.backups?.length ? ` Перед изменением сделал копии миров: ${res.backups.length}.` : ''}`) + linksText(res);
+
 function renderAnswer(r, p) {
   const by = `<p class="by">${r.understoodBy === 'model' ? 'Понял с помощью локальной модели' : 'Понял по правилам (без нейросети)'}${r.rejected ? ' · ответ модели отклонён проверкой' : ''}</p>`;
+  const push = (html, wire) => {
+    S.assistant.feed.push({ html, wire, r });
+    paintFeed();
+  };
+  const dropped = r.dropped?.length ? `<p class="hint">Не прошли проверку совместимости и не будут поставлены: ${r.dropped.map(esc).join(', ')}.</p>` : '';
+  const notFound = r.notFound?.length ? `<div class="notice">В каталоге нет: ${r.notFound.map(esc).join(', ')} — их нет в плане.</div>` : '';
+  if (r.kind === 'clarify') {
+    // ответы хранятся в самом ответе r: лента перерисовывается целиком, выбор не теряется
+    r.answers ||= Object.fromEntries(r.questions.map((q) => [q.id, (q.options.find((o) => o.selected) || q.options[0]).value]));
+    // «в текущую сборку» — вопросы про версию, загрузчик и размер новой сборки не нужны (и наоборот)
+    const shown = () => r.questions.filter((q) => !q.only || q.only === r.answers.where);
+    const html = () =>
+      `<h3>Уточню пару вещей, чтобы сделать как надо</h3>${shown()
+        .map((q) => `<div class="clarify-q"><b>${esc(q.title)}</b>${q.hint ? `<small>${esc(q.hint)}</small>` : ''}<div class="segmented" role="group" aria-label="${esc(q.title)}">${q.options.map((o, i) => `<button type="button" data-cq="${esc(q.id)}" data-ci="${i}" aria-pressed="${r.answers[q.id] === o.value}">${esc(o.label)}</button>`).join('')}</div></div>`)
+        .join('')}<div class="actions"><button class="btn btn-primary btn-small" data-a="go" ${r.sent ? 'disabled' : ''}>${r.sent ? 'Ответы отправлены' : r.answers.where === 'current' ? 'Подобрать моды' : 'Подобрать'}</button></div>${by}`;
+    const wire = (el) => {
+      $$('[data-cq]', el).forEach(
+        (b) =>
+          (b.onclick = () => {
+            if (r.sent) return;
+            const q = r.questions.find((x) => x.id === b.dataset.cq);
+            r.answers[q.id] = q.options[Number(b.dataset.ci)].value;
+            if (q.id === 'where') {
+              // другой набор вопросов: перерисовать этот ответ (и запомнить для перерисовки ленты)
+              const entry = S.assistant.feed.find((m) => m.r === r);
+              if (entry) entry.html = html();
+              el.innerHTML = html();
+              return wire(el);
+            }
+            $$(`[data-cq="${CSS.escape(q.id)}"]`, el).forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+          }),
+      );
+      $('[data-a="go"]', el).onclick = () => {
+        if (r.sent) return;
+        r.sent = true;
+        const sum = shown().map((q) => `${q.title}: ${q.options.find((o) => o.value === r.answers[q.id])?.label || ''}`).join(' · ');
+        ask(r.text, r.answers, sum);
+      };
+    };
+    return push(html(), wire);
+  }
+  if (r.kind === 'build') {
+    const b = r.build;
+    const groups = r.groups.map((g) => `<p><b>${esc(g.title)}:</b> ${g.names.map(esc).join(', ')}</p>`).join('');
+    return push(
+      `<h3>Новая сборка «${esc(b.name)}»</h3><p>Minecraft ${esc(b.minecraft)} · ${esc(LOADERS[b.loader] || b.loader)} · ${b.mods} ${plural(b.mods, 'мод', 'мода', 'модов')}${b.deps ? ` и ${b.deps} ${plural(b.deps, 'библиотека', 'библиотеки', 'библиотек')} для них` : ''}. Версию и загрузчик выбрал те, под которые есть больше всего нужных модов.</p>${groups}${notFound}${dropped}${r.note ? `<div class="notice">${esc(r.note)}</div>` : ''}<p><b>Что сделаю:</b></p>${taskSteps(r.task)}<details class="more"><summary>Весь список с версиями</summary>${planHtml(r.plan)}</details>${taskBox('Создать и установить')}${by}`,
+      (el) => wireTask(el, r, 'Создать и установить', doneText),
+    );
+  }
   if (r.kind === 'plan') {
-    return pushAnswer(`<h3>Предлагаю для «${esc(p.name)}»</h3><p>${esc(r.explanation || '')}</p>${planHtml(r.plan)}${r.notFound?.length ? `<div class="notice">В каталоге нет: ${r.notFound.map(esc).join(', ')} — их нет в плане.</div>` : ''}${r.already?.length ? `<p class="hint">Уже в сборке: ${r.already.map(esc).join(', ')}.</p>` : ''}${r.note ? `<div class="notice">${esc(r.note)}</div>` : ''}<div class="actions"><button class="btn btn-primary btn-small" data-a="apply" ${r.plan.ok ? '' : 'disabled'}>Посмотреть и применить</button></div>${by}`, (el) => {
-      if ($('[data-a="apply"]', el)) $('[data-a="apply"]', el).onclick = () => planDialog(r.plan, 'Изменения сборки', { pid: p.id, explanation: r.explanation });
-    });
+    return push(
+      `<h3>Предлагаю для «${esc(p.name)}»</h3><p>${esc(r.explanation || '')}</p>${r.task ? taskSteps(r.task) : planHtml(r.plan)}${notFound}${dropped}${r.already?.length ? `<p class="hint">Уже в сборке: ${r.already.map(esc).join(', ')}.</p>` : ''}${r.note ? `<div class="notice">${esc(r.note)}</div>` : ''}${r.task ? taskBox('Сделать', '<button class="btn btn-ghost btn-small" data-a="apply">Подробнее</button>') : `<div class="actions"><button class="btn btn-primary btn-small" data-a="apply" ${r.plan.ok ? '' : 'disabled'}>Посмотреть и применить</button></div>`}${by}`,
+      (el) => {
+        if ($('[data-a="apply"]', el)) $('[data-a="apply"]', el).onclick = () => planDialog(r.plan, 'Изменения сборки', { pid: p.id, explanation: r.explanation });
+        wireTask(el, r, 'Сделать', doneText);
+      },
+    );
   }
   if (r.kind === 'diagnose') {
     const f = r.findings || [];
-    return pushAnswer(`<h3>${f.length ? 'Нашёл, с чего начать' : 'Точную причину назвать не могу'}</h3>${f.map((x) => `<div class="notice ${x.level === 'error' ? 'error' : ''}"><strong>${esc(x.title)}</strong>${esc(x.fix)}</div>`).join('')}${r.guess ? `<div class="notice"><strong>${r.guess.confident ? 'Вероятная причина' : 'Предположение'}</strong>${esc(r.guess.text)}</div>` : ''}${r.needMore ? `<p>${esc(r.needMore)}</p>` : ''}${by}`);
+    const fix = r.task ? `<p><b>Могу исправить сам:</b></p>${taskSteps(r.task)}${r.task.significant ? '<p class="hint">Перед изменением сделаю копии миров этой сборки.</p>' : ''}${taskBox('Исправить')}` : '';
+    return push(`<h3>${f.length ? 'Нашёл, с чего начать' : 'Точную причину назвать не могу'}</h3>${f.map((x) => `<div class="notice ${x.level === 'error' ? 'error' : ''}"><strong>${esc(x.title)}</strong>${esc(x.fix)}</div>`).join('')}${r.guess ? `<div class="notice"><strong>${r.guess.confident ? 'Вероятная причина' : 'Предположение'}</strong>${esc(r.guess.text)}</div>` : ''}${r.needMore ? `<p>${esc(r.needMore)}</p>` : ''}${fix}${by}`, (el) =>
+      wireTask(el, r, 'Исправить', () => 'Готово, исправил. Запусти игру ещё раз — если вылет повторится, пришли новый журнал.'),
+    );
   }
   if (r.kind === 'optimize') {
-    return pushAnswer(`<h3>Стартовые настройки</h3><ul class="plan-steps"><li>${icon('check')}<span>Прорисовка ${r.options.render}, симуляция ${r.options.simulation}, графика «${r.options.graphics ? 'детальная' : 'быстрая'}»</span></li><li>${icon('check')}<span>Память игре: ${r.ram} ГБ</span></li></ul>${r.plan ? `<p>Моды оптимизации:</p>${planHtml(r.plan)}` : ''}<p class="hint">${esc(r.note)}</p><div class="actions"><button class="btn btn-primary btn-small" data-a="opt">Применить настройки</button>${r.plan?.ok ? '<button class="btn btn-secondary btn-small" data-a="mods">Поставить моды</button>' : ''}</div>${by}`, (el) => {
-      $('[data-a="opt"]', el).onclick = async () => {
-        S.settings = await call('settings:set', { options: r.options });
-        toast('Настройки применятся при следующем запуске');
-      };
-      if ($('[data-a="mods"]', el)) $('[data-a="mods"]', el).onclick = () => planDialog(r.plan, 'Моды оптимизации', { pid: p.id });
-    });
+    return push(`<h3>Настройки под твой ПК</h3>${taskSteps(r.task)}<p class="hint">${esc(r.note)}</p>${taskBox('Применить всё')}${by}`, (el) =>
+      wireTask(el, r, 'Применить всё', () => 'Готово. Новые настройки применятся при следующем запуске игры.'),
+    );
   }
-  pushAnswer(`<p>${esc(r.message || '')}</p>${r.kind === 'needs-loader' ? '<div class="actions"><button class="btn btn-secondary btn-small" data-act="create-fabric">Новая сборка с модами</button></div>' : ''}${by}`);
+  pushAnswer(`<p>${esc(r.message || '')}</p>${by}`);
 }
 $('#assistant-form').onsubmit = (e) => {
   e.preventDefault();
@@ -2105,7 +2381,9 @@ $$('[data-window]').forEach((b) => (b.onclick = () => call('win:' + b.dataset.wi
     animateEnter();
     render();
   } catch (e) {
-    $('#main').innerHTML = `<div class="page"><div class="notice error"><strong>Не удалось загрузить данные лаунчера</strong>${esc(e.message)}</div></div>`;
+    $('#main').innerHTML = `<div class="page"><div class="notice error"><strong>Не удалось загрузить данные лаунчера</strong>${esc(e.message)}</div><div class="actions"><button class="btn btn-primary" id="boot-retry">Повторить</button><button class="btn btn-ghost" id="boot-logs">Журнал лаунчера</button></div></div>`;
+    $('#boot-retry').onclick = () => location.reload();
+    $('#boot-logs').onclick = () => call('open:folder', 'logs');
   }
   call('mc:versions')
     .then((v) => (S.versions = v))

@@ -13,7 +13,7 @@ const loaders = require('../core/loaders');
 const { Launcher } = require('../core/launcher');
 const { Mojang } = require('../core/mojang');
 const { createFakeMojang } = require('./fakemojang');
-const { buildFixtures, waitEvent } = require('./helpers');
+const { NO_FAKE_JAVA, buildFixtures, waitEvent } = require('./helpers');
 
 const AUTH = { name: 'HostPlayer', uuid: 'abc', accessToken: 'tok', xuid: '', clientId: '' };
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
@@ -29,7 +29,8 @@ test('версии NeoForge → версия Minecraft, сортировка в�
   assert.ok(loaders.cmp('21.1.1', '21.1.1-beta') > 0, 'релиз новее беты');
 });
 
-test('Fabric, Quilt, Forge, NeoForge: версии, рекомендуемая, поддерживаемые версии игры', async () => {
+test('Fabric, Quilt, Forge, NeoForge: версии, рекомендуемая, поддерживаемые версии игры', async (t) => {
+  if (!buildFixtures().ok) return t.skip('нет JDK'); // имитация Mojang собирает поддельные JAR через javac
   const fm = await createFakeMojang({ delayMs: 0 });
   http.setFetch((u, o) => fetch(fm.rewrite(u), o));
   try {
@@ -57,6 +58,7 @@ for (const [loader, check] of [
 ]) {
   test(`${loader}: установка загрузчика, запуск клиента и сервера сессии`, async (t) => {
     if (!buildFixtures().ok) return t.skip('нет JDK');
+    if (NO_FAKE_JAVA) return t.skip(NO_FAKE_JAVA);
     const fm = await createFakeMojang({ delayMs: 0 });
     http.setFetch((u, o) => fetch(fm.rewrite(u), o));
     process.env.FAKE_SERVER_JAR = buildFixtures().serverJar;
@@ -162,6 +164,7 @@ test('сборки с любыми версиями из манифеста: с�
 
 test('Forge с установщиком без режима «без окна»: лаунчер сам берёт свежий официальный установщик', async (t) => {
   if (!buildFixtures().ok) return t.skip('нет JDK');
+  if (NO_FAKE_JAVA) return t.skip(NO_FAKE_JAVA);
   const fm = await createFakeMojang({ delayMs: 0 });
   http.setFetch((u, o) => fetch(fm.rewrite(u), o));
   const l = new Launcher(tmp('easy-ldold-'), { totalMem: 16 * 1024 ** 3 });

@@ -27,7 +27,7 @@ test.after(() => mock.close());
 
 function manager(mode, extra = {}) {
   process.env.FAKE_LLAMA_MODE = mode;
-  return new AiManager(fs.mkdtempSync(path.join(os.tmpdir(), 'easy-ai-')), { serverBinary: FAKE, modelPath: fakeModel, idleMs: 0, ...extra });
+  return new AiManager(fs.mkdtempSync(path.join(os.tmpdir(), 'easy-ai-')), { serverBinary: process.execPath, serverArgs: [FAKE], modelPath: fakeModel, idleMs: 0, ...extra });
 }
 
 test('правила понимают русские запросы из сценариев', () => {
@@ -190,6 +190,33 @@ test('движок llama.cpp: выпуски-prerelease, .tar.gz и .zip, про
     await assert.rejects(ai.plan('qwen3-4b'), /Не найден файл модели Qwen3 4B/);
     const st2 = await ai.status();
     assert.ok(['qwen3-4b', 'gemma3-4b', 'gemma3n-e2b'].every((id) => st2.models.some((m) => m.id === id && m.ramGb >= 6)));
+  } finally {
+    http.setFetch((...a) => globalThis.fetch(...a));
+  }
+});
+
+test('загрузка модели одна на всё приложение: второе «Скачать» не начинает вторую загрузку', async () => {
+  const http = require('../core/http');
+  let release;
+  let started;
+  const called = new Promise((r) => (started = r));
+  // скачивание «висит», пока тест его не отпустит; дальше сервер отвечает 404 без повторов
+  http.setFetch(() => {
+    started();
+    return release ? Promise.resolve(new Response('nf', { status: 404 })) : new Promise((r) => (release = () => r(new Response('nf', { status: 404 }))));
+  });
+  try {
+    const ai = new AiManager(fs.mkdtempSync(path.join(os.tmpdir(), 'easy-ai-busy-')));
+    const plan = { runtime: { tag: 'b1', name: 'rt.zip', url: 'https://x/rt.zip', size: 100, sha256: 'a'.repeat(64) }, model: { id: 'm', label: 'Тестовая модель', file: 'm.gguf', url: 'https://x/m.gguf', size: 200, sha256: 'b'.repeat(64) }, totalBytes: 300 };
+    const first = ai.install(plan);
+    await called;
+    const st = await ai.status();
+    assert.deepEqual([st.installing.label, st.installing.total], ['Тестовая модель', 300], 'окно видит идущую загрузку на любой вкладке');
+    await assert.rejects(ai.install(plan), /Уже скачивается Тестовая модель/);
+    await assert.rejects(ai.uninstall(), /ещё скачивается/);
+    release();
+    await assert.rejects(first);
+    assert.equal((await ai.status()).installing, null, 'после ошибки можно скачать снова');
   } finally {
     http.setFetch((...a) => globalThis.fetch(...a));
   }

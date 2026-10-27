@@ -77,7 +77,7 @@ function processRssMb(pid) {
 }
 
 class AiManager {
-  /** opts.serverBinary/modelPath — подмена для тестов и ручной настройки. */
+  /** opts.serverBinary/serverArgs/modelPath — подмена для тестов и ручной настройки. */
   constructor(root, opts = {}) {
     this.dir = path.join(root, 'ai');
     this.stateFile = path.join(this.dir, 'state.json');
@@ -87,6 +87,7 @@ class AiManager {
     this.idleTimer = null;
     this.idleMs = opts.idleMs ?? 5 * 60 * 1000;
     this.loading = null;
+    this.installing = null; // {modelId, label, done, total}
   }
 
   async state() {
@@ -114,6 +115,8 @@ class AiManager {
       running: !!this.proc,
       pid: this.proc?.pid || null,
       rssMb: this.proc ? await processRssMb(this.proc.pid) : 0,
+      // идущая загрузка: окно показывает её на любой вкладке и не даёт начать вторую
+      installing: this.installing ? { ...this.installing } : null,
       models: MODELS.map(({ id, label, license, terms, ramGb, note, default: d }) => ({ id, label, license, terms: terms || null, ramGb, note: note || '', default: !!d })),
       totalRamGb: Math.round(os.totalmem() / 1024 ** 3),
     };
@@ -147,12 +150,21 @@ class AiManager {
     });
   }
 
-  async install(plan, { signal, onProgress } = {}) {
-    let done = 0;
-    const total = plan.runtime.size + plan.model.size;
+  /** Установка движка и модели. Одновременно идёт только одна: повторное нажатие не начинает вторую загрузку. */
+  async install(plan, opts = {}) {
+    if (this.installing) throw Object.assign(new Error(`Уже скачивается ${this.installing.label} — дождись окончания.`), { code: 'BUSY' });
+    this.installing = { modelId: plan.model.id, label: plan.model.label, done: 0, total: plan.runtime.size + plan.model.size };
+    try {
+      return await this._install(plan, opts);
+    } finally {
+      this.installing = null;
+    }
+  }
+
+  async _install(plan, { signal, onProgress } = {}) {
     const onBytes = (n) => {
-      done += n;
-      onProgress?.({ done, total });
+      this.installing.done += n;
+      onProgress?.({ ...this.installing });
     };
     await fsp.mkdir(this.dir, { recursive: true });
     const zip = path.join(this.dir, 'downloads', plan.runtime.name);
@@ -172,6 +184,7 @@ class AiManager {
 
   /** Удалить движок и модель (освобождает место на диске). */
   async uninstall() {
+    if (this.installing) throw Object.assign(new Error('Модель ещё скачивается — дождись окончания.'), { code: 'BUSY' });
     await this.stop();
     await fsp.rm(this.dir, { recursive: true, force: true });
   }
@@ -189,7 +202,8 @@ class AiManager {
       while (!(await portFree(port, '127.0.0.1'))) port++;
       const threads = Math.max(1, Math.min(4, Math.floor(os.cpus().length / 2)));
       const args = ['-m', model, '--host', '127.0.0.1', '--port', String(port), '-c', '2048', '-t', String(threads), '-n', '384', '-np', '1', ...(this.opts.extraArgs || [])];
-      const proc = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+      // serverArgs идут перед аргументами llama-server: так тест запускает имитацию через node (на Windows скрипт .js сам не запускается)
+      const proc = spawn(bin, [...(this.opts.serverArgs || []), ...args], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
       proc.stderr.on('data', () => {});
       this.proc = proc;
       this.port = port;

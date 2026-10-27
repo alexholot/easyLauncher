@@ -30,7 +30,7 @@ function createMock() {
 
   const mr = { projects: {}, versions: {} };
   function mrProject(id, slug, title, client, server, extra = {}) {
-    mr.projects[id] = { id, slug, title, description: title + ' description', client_side: client, server_side: server, project_type: 'mod', categories: ['fabric'], game_versions: ['1.21.1'], icon_url: null, ...extra };
+    mr.projects[id] = { id, slug, title, description: title + ' description', client_side: client, server_side: server, project_type: 'mod', categories: ['fabric'], loaders: ['fabric'], game_versions: ['1.21.1'], icon_url: null, ...extra };
   }
   function mrVersion(id, projectId, number, { mc = ['1.21.1'], loaders = ['fabric'], type = 'release', deps = [], buf, env, published = '2026-09-01T00:00:00Z' }) {
     const f = file(`${projectId}-${number}.jar`, buf);
@@ -100,12 +100,23 @@ function createMock() {
     let m;
     if (u.pathname === '/mr/search') {
       const q = (u.searchParams.get('query') || '').toLowerCase();
-      const facets = JSON.parse(u.searchParams.get('facets') || '[]').flat();
+      // фасеты как у Modrinth: группы через И, значения в группе через ИЛИ; загрузчик — среди categories
+      const groups = JSON.parse(u.searchParams.get('facets') || '[]');
+      const facetOk = (p, f) => {
+        const [k, v] = f.split(':');
+        if (k === 'versions') return p.game_versions.includes(v);
+        if (k === 'categories') return p.categories.includes(v) || (p.loaders || []).includes(v);
+        return true;
+      };
       const hits = Object.values(mr.projects)
         .filter((p) => !q || p.title.toLowerCase().includes(q))
-        .filter((p) => facets.every((f) => !f.startsWith('versions:') || p.game_versions.includes(f.slice(9))))
+        .filter((p) => groups.every((g) => g.some((f) => facetOk(p, f))))
         .map((p) => ({ ...p, project_id: p.id, author: 'dev', versions: p.game_versions, display_categories: p.categories }));
       return json(200, { hits, total_hits: hits.length, offset: 0, limit: 20 });
+    }
+    if (u.pathname === '/mr/projects') {
+      const ids = JSON.parse(u.searchParams.get('ids') || '[]');
+      return json(200, Object.values(mr.projects).filter((p) => ids.includes(p.id) || ids.includes(p.slug)));
     }
     if (u.pathname === '/mr/tag/category') return json(200, [{ name: 'adventure', project_type: 'mod', header: 'categories' }, { name: 'technology', project_type: 'mod', header: 'categories' }]);
     if ((m = u.pathname.match(/^\/mr\/project\/([^/]+)\/version$/))) {
@@ -170,7 +181,7 @@ function createMock() {
       cfFile(7001, 3001, 'sodium-cf', { buf: fabricJar('sodium-cf', 'client') });
       cfMod(3002, 'Fabric API');
       cfFile(7002, 3002, 'fabric-api-cf', { buf: fabricApi }); // тот же файл, что на Modrinth
-      resolve({ server, base: () => base, opts, files, cf, mr, addMrVersion: mrVersion, fabricJar, blockedBuf: () => files['cf-6001-blocked-1.0.jar'], close: () => server.close() });
+      resolve({ server, base: () => base, opts, files, cf, mr, addMrProject: mrProject, addMrVersion: mrVersion, fabricJar, blockedBuf: () => files['cf-6001-blocked-1.0.jar'], close: () => server.close() });
     }),
   );
 }

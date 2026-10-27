@@ -38,7 +38,8 @@ const CF_PATHS = [/^\/v1\/mods\/search$/, /^\/v1\/mods\/\d+$/, /^\/v1\/mods\/\d+
 function createServer(cfg = {}) {
   const config = {
     port: Number(cfg.port ?? process.env.PORT ?? 8787),
-    publicUrl: cfg.publicUrl ?? process.env.PUBLIC_URL ?? '',
+    // на Render внешний адрес приходит сам (RENDER_EXTERNAL_URL) — вписывать PUBLIC_URL вручную не нужно
+    publicUrl: cfg.publicUrl ?? process.env.PUBLIC_URL ?? process.env.RENDER_EXTERNAL_URL ?? '',
     cfApiKey: cfg.cfApiKey ?? process.env.CF_API_KEY ?? '',
     cfBase: cfg.cfBase ?? 'https://api.curseforge.com',
     stun: (cfg.stun ?? process.env.STUN_URLS ?? 'stun:stun.l.google.com:19302').split(',').filter(Boolean),

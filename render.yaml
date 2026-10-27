@@ -1,0 +1,14 @@
+# Сервер комнат easyLauncher на Render (бесплатный тариф): приглашения, сигналинг WebRTC и запасной relay.
+# Render → New → Blueprint → этот репозиторий → Apply. Адрес сервера Render выдаст сам (…onrender.com).
+services:
+  - type: web
+    name: easylauncher-rooms
+    runtime: node
+    plan: free
+    rootDir: server
+    buildCommand: npm install --omit=dev
+    startCommand: node index.js
+    healthCheckPath: /v1/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"

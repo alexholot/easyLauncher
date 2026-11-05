@@ -10,6 +10,7 @@ const { createServer } = require('../../server');
 const { HostSession, GuestSession } = require('../../core/net/session');
 const { RelayHost, RelayGuest } = require('../../core/net/relay');
 const { RtcEngine, RtcHost, RtcGuest } = require('../../core/net/webrtc');
+const { mcLogin } = require('../mclogin');
 
 // mDNS-имена вместо адресов кандидатов не разрешаются в изолированных средах
 app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
@@ -43,12 +44,24 @@ async function scenario(engine, backend, gamePort, guestTransports) {
   const t0 = Date.now();
   const conn = await guest.connect({ directTimeoutMs: 8000 });
   const connectMs = Date.now() - t0;
-  const big = crypto.randomBytes(2 * 1024 * 1024);
+  // игровой поток начинается со входа в Minecraft под ником друга — иначе хозяин его не пропустит
+  const big = Buffer.concat([mcLogin('Friend1'), crypto.randomBytes(2 * 1024 * 1024)]);
+  const ping = Buffer.concat([mcLogin('Friend1'), Buffer.from('ping')]);
   const t1 = Date.now();
-  const res = await Promise.all([roundTrip(conn.port, big), roundTrip(conn.port, Buffer.from('ping')), roundTrip(conn.port, crypto.randomBytes(50000))]);
+  const res = await Promise.all([roundTrip(conn.port, big), roundTrip(conn.port, ping), roundTrip(conn.port, Buffer.concat([mcLogin('Friend1'), crypto.randomBytes(50000)]))]);
   const ms = Date.now() - t1;
   assert.ok(res[0].equals(big), 'данные без искажений');
-  assert.equal(res[1].toString(), 'ping');
+  assert.ok(res[1].equals(ping));
+  // вход под ником хозяина по этому же каналу — закрывается, ничего не возвращается
+  const spoof = await new Promise((resolve) => {
+    const c = net.connect(conn.port, '127.0.0.1');
+    let got = 0;
+    c.on('data', (d) => (got += d.length));
+    c.on('close', () => resolve(got));
+    c.on('error', () => {});
+    c.write(Buffer.concat([mcLogin('HostPlayer'), Buffer.from('x')]));
+  });
+  assert.equal(spoof, 0, 'вход под чужим ником отклонён');
   const routes = host.state('online').guests[0].routes;
   await guest.close();
   await host.close();

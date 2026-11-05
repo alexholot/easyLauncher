@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { Assistant, validateIntent, ruleIntent, proposeMods } = require('../core/ai/assistant');
-const { diagnose, sanitize } = require('../core/ai/diagnose');
+const { diagnose, sanitize, keyLines, suspects } = require('../core/ai/diagnose');
 const { AiManager, processRssMb } = require('../core/ai/manager');
 const { planChanges } = require('../core/modplan');
 const { ModrinthProvider } = require('../core/catalog/modrinth');
@@ -43,6 +43,9 @@ test('правила понимают русские запросы из сце�
   assert.equal(c.intent, 'optimize');
   assert.equal(c.lowEnd, true);
   assert.equal(ruleIntent('После обновления игра перестала запускаться').intent, 'diagnose');
+  const z = ruleIntent('Хочу зомби ночью, страшную атмосферу и без огнестрельного оружия');
+  assert.equal(z.archetype, 'night_horror');
+  assert.ok(z.constraints.includes('no_firearms'));
 });
 
 test('строгая проверка ответа модели', () => {
@@ -53,6 +56,8 @@ test('строгая проверка ответа модели', () => {
   assert.equal(validateIntent({ ...ok, themes: ['nuclear'] }), null);
   assert.equal(validateIntent({ ...ok, searchTerms: ['https://x.y/mod.jar'] }), null, 'ссылки не принимаются');
   assert.equal(validateIntent({ ...ok, players: 1000 }), null);
+  assert.equal(validateIntent({ ...ok, archetype: 'execute_shell' }), null);
+  assert.equal(validateIntent({ ...ok, constraints: ['download_any_url'] }), null);
   assert.equal(validateIntent('строка'), null);
 });
 
@@ -100,6 +105,10 @@ test('диагностика: правила, вычистка личных да
   assert.match(f[0].fix, /Java 21.*Java 17/);
   const dep = diagnose("Mod 'Create' (create) 6.0.0 requires any version of 'Fabric API' (fabric-api), which is missing!");
   assert.ok(dep.some((x) => x.id === 'missing-dep-fabric' && /Fabric API/.test(x.fix)));
+  const mixin = diagnose('Compatibility level JAVA_17 specified by breakingplace201forge.mixins.json is higher than the maximum level supported by this version of mixin (JAVA_13).');
+  assert.equal(mixin[0].id, 'mixin-java');
+  assert.deepEqual(mixin[0].data, { mixinConfig: 'breakingplace201forge.mixins.json', requiredJava: 17 });
+  assert.match(mixin[0].fix, /Java 17.*только 13/);
   const s = sanitize('C:\\Users\\Alex\\AppData --accessToken eyJabcdefghijk.eyJabcdefghijk.sig 192.168.1.5:25565');
   assert.ok(!/Alex|eyJ|192\.168/.test(s));
   const asst = new Assistant({ llm: null });
@@ -110,6 +119,49 @@ test('диагностика: правила, вычистка личных да
   assert.equal(r2.by, 'model');
   assert.equal(r2.guess.confident, false);
   await ai.stop();
+});
+
+test('диагностика: «…Exception» без пробела перед словом, виновник из crash-report Forge, Mixin с названием мода', async () => {
+  const npe = [
+    '---- Minecraft Crash Report ----',
+    'Description: Ticking entity',
+    '',
+    'java.lang.NullPointerException: Cannot invoke "Player.getX()" because "this.targetPlayer" is null',
+    '\tat com.mrcrayfish.cave_dweller.entity.ai.goals.CaveDwellerChaseGoal.tick(CaveDwellerChaseGoal.java:112) ~[cave_dweller-1.20.1-1.7.0.jar%23214!/:1.7.0]',
+    '\tat net.minecraft.world.entity.ai.goal.WrappedGoal.tick(WrappedGoal.java:65)',
+    '',
+    '-- Head --',
+    'Thread: Server thread',
+    'Suspected Mod: ',
+    '\tCave Dweller Evolved (cave_dweller), Version: 1.7.0',
+    '\t\tat TRANSFORMER/cave_dweller@1.7.0/com.mrcrayfish.cave_dweller.entity.ai.goals.CaveDwellerChaseGoal.tick(CaveDwellerChaseGoal.java:112)',
+    '',
+    '-- System Details --',
+    '\tJVM Flags: 4 total; -Xmx2G',
+  ].join('\n');
+  const lines = keyLines(npe);
+  assert.ok(lines.some((l) => /NullPointerException/.test(l)), 'NullPointerException попадает в ключевые строки');
+  assert.ok(lines.some((l) => /CaveDwellerChaseGoal\.tick/.test(l)), 'и первая строка стека после неё');
+  assert.ok(!lines.some((l) => /JVM Flags/.test(l)));
+  assert.deepEqual(suspects(npe), [{ name: 'Cave Dweller Evolved', id: 'cave_dweller', version: '1.7.0' }]);
+  const noModel = await new Assistant({ llm: null }).diagnose(npe);
+  assert.match(noModel.needMore, /Cave Dweller Evolved.*1\.7\.0/, 'без модели — честная подсказка, на кого указала игра');
+  assert.ok(!/нет ошибок/.test(noModel.needMore));
+  const ai = manager('good');
+  const withModel = await new Assistant({ llm: ai }).diagnose(npe);
+  assert.equal(withModel.by, 'model', 'такой вылет доходит до модели');
+  await ai.stop();
+  // Forge: Mixin упал у конкретного мода — правило называет его, а не «один из модов»
+  const forge = ['-- Mod loading issue for: oculus --', 'Details:', '\tCaused by 1: org.spongepowered.asm.mixin.throwables.MixinApplyError: Mixin [mixins.oculus.compat.sodium.json:X] FAILED during APPLY'].join('\n');
+  const mx = diagnose(forge).filter((f) => f.id === 'mixin');
+  assert.equal(mx.length, 1, 'одна находка, без дубля от общего правила');
+  assert.deepEqual(mx[0].data, { modId: 'oculus' });
+  assert.match(mx[0].fix, /oculus/);
+  assert.equal(diagnose('MixinApplyError: Mixin [a.json:B] FAILED during APPLY').filter((f) => f.id === 'mixin').length, 1, 'общее правило работает как раньше');
+  // окно «Found N error(s) during startup» (настоящий вывод Fabulously Optimized + REI без Architectury)
+  const nf = diagnose('Found 1 error(s) during startup:\n- Architectury API is a required dependency of Roughly Enough Items 12.1.785 but it is not installed!\nhttps://www.curseforge.com/minecraft/mc-mods/architectury-api/');
+  assert.deepEqual(nf.map((f) => f.id), ['missing-dep-notifier']);
+  assert.deepEqual(nf[0].data, { mod: 'Roughly Enough Items', depName: 'Architectury API', depId: 'architectury-api' });
 });
 
 test('модель загружается по запросу и полностью выгружается', async () => {

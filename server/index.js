@@ -67,6 +67,8 @@ function createServer(cfg = {}) {
     }
     e.n++;
     limits.set(k, e);
+    // счётчики по адресам не копятся вечно (иначе за недели работы — утечка памяти)
+    if (limits.size > 20000) for (const [key, v] of limits) if (t > v.reset) limits.delete(key);
     return e.n > perMinute;
   }
 
@@ -236,8 +238,14 @@ function createServer(cfg = {}) {
         if (!g || g.roomId !== room.id) return;
         const gws = guests.get(msg.ticket);
         if (msg.type === 'guest-accept') {
-          g.accepted = true;
-          send(gws, { type: 'accepted' });
+          try {
+            rooms.accept(msg.ticket);
+            send(gws, { type: 'accepted' });
+          } catch (e) {
+            send(gws, { type: 'rejected', reason: e.message });
+            rooms.tickets.delete(msg.ticket);
+            gws?.close(4003, 'rejected');
+          }
         } else if (msg.type === 'guest-reject') {
           send(gws, { type: 'rejected', reason: String(msg.reason || '').slice(0, 200) });
           rooms.tickets.delete(msg.ticket);
@@ -286,6 +294,10 @@ function createServer(cfg = {}) {
       if ((relayCount.get(roomId) || 0) >= config.relayMax) return ws.close(4029, 'too many connections');
       const host = hosts.get(roomId);
       if (!host) return ws.close(4004, 'host offline');
+      // ждущих пары соединений от одного гостя — не больше 8 (игра открывает 1–2, голос — 1)
+      let waiting = 0;
+      for (const k of relayWaiting.keys()) if (k.startsWith(ctx.ticket + '|')) waiting++;
+      if (waiting >= 8 || relayWaiting.has(pairKey)) return ws.close(4029, 'too many pending connections');
       // до образования пары данные гостя не читаем — иначе первые байты (рукопожатие Minecraft) потеряются
       ws.pause();
       const timer = setTimeout(() => {

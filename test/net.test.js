@@ -14,6 +14,7 @@ const { RelayHost, RelayGuest } = require('../core/net/relay');
 const { Emitter } = require('../core/net/transport');
 const { Launcher } = require('../core/launcher');
 const { buildFixtures, testLauncher, waitEvent } = require('./helpers');
+const { mcLogin } = require('./mclogin');
 
 const manifest = { format: 'easylauncher.room-manifest/1', room: { name: 'Мир', minecraft: '1.21.1', loader: 'vanilla' }, mods: [] };
 
@@ -79,6 +80,8 @@ test('приглашение: ссылка, срок, лимит, имя, отз
   await assert.rejects(g.join(inv.link, 'Stranger'), /другому игроку/);
   await assert.rejects(g.join(inv.link.replace(/t=[^&]+/, 't=' + 'A'.repeat(43)), 'Friend1'), /недействительно/);
   await g.join(inv.link, 'Friend1');
+  assert.equal((await host.invites())[0].uses, 0, 'просмотр сборки не расходует приглашение');
+  srv.rooms.accept(g.ticket);
   await assert.rejects(new GuestSession({ transports: [] }).join(inv.link, 'Friend1'), /все участники/);
 
   // истёкшее приглашение
@@ -112,10 +115,12 @@ test('гость: допуск хозяином, прямой путь недо�
   assert.equal(conn.route, 'relay');
   assert.deepEqual(stages, ['waiting-host', 'try-direct', 'try-relay']);
   assert.deepEqual(asked, ['Friend1']);
-  const big = crypto.randomBytes(4 * 1024 * 1024);
-  const results = await Promise.all([roundTrip(conn.port, big), roundTrip(conn.port, Buffer.from('ping')), roundTrip(conn.port, crypto.randomBytes(100000))]);
+  // каждый игровой поток начинается со входа в Minecraft под ником друга (иначе хозяин его не пропустит)
+  const big = Buffer.concat([mcLogin('Friend1'), crypto.randomBytes(4 * 1024 * 1024)]);
+  const ping = Buffer.concat([mcLogin('Friend1'), Buffer.from('ping')]);
+  const results = await Promise.all([roundTrip(conn.port, big), roundTrip(conn.port, ping), roundTrip(conn.port, Buffer.concat([mcLogin('Friend1'), crypto.randomBytes(100000)]))]);
   assert.ok(results[0].equals(big), '4 МБ через relay без искажений');
-  assert.equal(results[1].toString(), 'ping');
+  assert.ok(results[1].equals(ping));
   assert.ok(srv.stats.relayBytes >= big.length * 2);
   const st = host.state('online');
   assert.deepEqual(st.guests[0].routes, ['relay']);
@@ -139,7 +144,7 @@ test('отказ хозяина и отзыв приглашения во вре
   const { port } = await guest.connect();
   const sock = net.connect(port, '127.0.0.1');
   await new Promise((r) => sock.once('connect', r));
-  sock.write('x');
+  sock.write(Buffer.concat([mcLogin('Friend1'), Buffer.from('x')]));
   await new Promise((r) => sock.once('data', r));
   const revokedEvent = new Promise((r) => guest.once('revoked', r));
   const closed = new Promise((r) => sock.once('close', r));
@@ -186,22 +191,24 @@ test('сквозной сценарий на одном ПК: сервер хо�
     const p = await hostL.store.createProfile({ minecraft: '1.21.1', loader: 'vanilla' });
     const w = { name: 'Совместный' };
     process.env.FAKE_CLIENT_MS = '200';
-    await hostL.startSession({ profileId: p.id, create: { name: w.name }, auth: { name: 'HostPlayer', uuid: 'a', accessToken: 't' }, eula: true, serverRam: 1 });
-    const host = new HostSession({ backend, transports: [new RelayHost()], targetPort: hostL.server.port, onGuest: async (name) => (hostL.allowPlayer(name), true) });
+    await hostL.startSession({ profileId: p.id, create: { name: w.name }, auth: { name: 'HostPlayer', uuid: 'a', accessToken: 't' }, eula: true, serverRam: 1, offlineGuests: true });
+    const host = new HostSession({ backend, transports: [new RelayHost()], targetPort: hostL.server.port, onGuest: async (name) => (await hostL.allowPlayer(name), true) });
     await host.open({ name: w.name, manifest, hostName: 'HostPlayer' });
     const inv = await host.invite({});
     const guest = new GuestSession({ transports: [new FailingDirect(), new RelayGuest()] });
     await guest.join(inv.link, 'Friend1');
     const { port } = await guest.connect();
     const gp = await guestL.store.createProfile({ minecraft: '1.21.1', loader: 'vanilla', kind: 'room' });
-    await guestL.playGuest({ profileId: gp.id, address: '127.0.0.1:' + port, auth: { name: 'Friend1', uuid: 'b', accessToken: 't' }, ram: 2 });
+    await guestL.playGuest({ profileId: gp.id, address: '127.0.0.1:' + port, auth: null, offlineName: 'Friend1', ram: 2 });
     await waitEvent(guestL, (ev) => ev.type === 'client' && ev.state === 'stopped');
     assert.ok(guestL.clientLines.includes('connected:hello'), 'клиент друга дошёл до сервера хозяина через relay');
-    assert.ok(hostL.server.lines.some((l) => l.includes('Added Friend1 to the whitelist')));
+    const whitelist = JSON.parse(fs.readFileSync(path.join(hostL.store.serverDir(p.id), 'whitelist.json'), 'utf8'));
+    assert.ok(whitelist.some((x) => x.name === 'Friend1'), 'офлайн-гость записан в белый список напрямую');
     await guest.close();
     await host.close();
   } finally {
     delete process.env.FAKE_CLIENT_MS;
+    await guestL.shutdown();
     await hostL.shutdown();
   }
 });

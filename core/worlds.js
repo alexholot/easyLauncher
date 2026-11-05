@@ -5,13 +5,29 @@
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
-const AdmZip = require('adm-zip');
+const { Worker } = require('worker_threads');
 const { readLevel } = require('./nbt');
 const { readJson, writeJson } = require('./store');
 const { retryFs } = require('./http');
 
 const FOLDER_RE = /^[^\\/:*?"<>|\x00-\x1f]{1,120}$/;
 const IMG_RE = /\.(png|jpe?g|webp)$/i;
+
+function archiveWorker(action, source, target) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(path.join(__dirname, 'archive-worker.js'), { workerData: { action, source, target } });
+    let answered = false;
+    worker.once('message', (m) => {
+      answered = true;
+      if (m.ok) resolve();
+      else reject(new Error(m.message || 'Не удалось обработать резервную копию.'));
+    });
+    worker.once('error', reject);
+    worker.once('exit', (code) => {
+      if (!answered) reject(new Error(code ? 'Обработка резервной копии неожиданно остановилась.' : 'Обработка резервной копии завершилась без результата.'));
+    });
+  });
+}
 
 function checkFolder(f) {
   if (!FOLDER_RE.test(String(f)) || f === '.' || f === '..') throw new Error('Некорректная папка мира.');
@@ -202,11 +218,8 @@ class Worlds {
       await fsp.mkdir(bdir, { recursive: true });
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       const file = `${stamp}-${reason}.zip`;
-      const zip = new AdmZip();
-      zip.addLocalFolder(dir, 'world', (n) => !/(^|[\\/])session\.lock$/.test(n));
       const tmp = path.join(bdir, file + '.part');
-      await new Promise((res, rej) => zip.writeZip(tmp, (err) => (err ? rej(err) : res())));
-      if (!new AdmZip(tmp).getEntry('world/level.dat')) throw new Error('Резервная копия получилась неполной.');
+      await archiveWorker('backup', dir, tmp);
       await retryFs(() => fsp.rename(tmp, path.join(bdir, file)));
       const meta = { id: stamp, file, reason, reasonText, createdAt: new Date().toISOString(), size: fs.statSync(path.join(bdir, file)).size };
       await writeJson(path.join(bdir, file.replace(/\.zip$/, '.json')), meta);
@@ -233,8 +246,7 @@ class Worlds {
     const dir = this.dir(pid, folder);
     const staging = dir + '.restore';
     await fsp.rm(staging, { recursive: true, force: true });
-    new AdmZip(path.join(this.backupsDir(pid, folder), b.file)).extractAllTo(staging, true);
-    if (!fs.existsSync(path.join(staging, 'world', 'level.dat'))) throw new Error('В копии нет level.dat.');
+    await archiveWorker('restore', path.join(this.backupsDir(pid, folder), b.file), staging);
     const old = dir + '.old';
     await fsp.rm(old, { recursive: true, force: true });
     if (fs.existsSync(dir)) await retryFs(() => fsp.rename(dir, old), 'папка мира');

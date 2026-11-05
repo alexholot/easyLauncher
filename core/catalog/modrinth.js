@@ -11,7 +11,7 @@ const ENV_SIDES = {
   client_only: ['required', 'unsupported'],
   singleplayer_only: ['required', 'unsupported'],
   server_only: ['unsupported', 'required'],
-  dedicated_server_only: ['unsupported', 'required'],
+  dedicated_server_only: ['unsupported', 'required', true],
   client_and_server: ['required', 'required'],
   server_only_client_optional: ['optional', 'required'],
   client_only_server_optional: ['required', 'optional'],
@@ -19,7 +19,8 @@ const ENV_SIDES = {
   client_or_server_prefers_both: ['optional', 'optional'],
 };
 function sideOf(env, project) {
-  if (ENV_SIDES[env]) return { client: ENV_SIDES[env][0], server: ENV_SIDES[env][1] };
+  // dedicated: мод работает только на выделенном сервере — в одиночную игру его не кладём
+  if (ENV_SIDES[env]) return ENV_SIDES[env][2] ? { client: ENV_SIDES[env][0], server: ENV_SIDES[env][1], dedicated: true } : { client: ENV_SIDES[env][0], server: ENV_SIDES[env][1] };
   const norm = (v) => (['required', 'optional', 'unsupported'].includes(v) ? v : 'unknown');
   return { client: norm(project?.client_side), server: norm(project?.server_side) };
 }
@@ -146,6 +147,19 @@ class ModrinthProvider {
       }
     }
     return out;
+  }
+
+  /**
+   * Релизы пачкой (GET /versions?ids=…) — кладутся в кэш как /version/{id}: план большой сборки
+   * потом не спрашивает каждый релиз отдельно (иначе сотни запросов и ограничение частоты).
+   */
+  async warmVersions(ids) {
+    const list = [...new Set(ids.filter(Boolean))];
+    for (let i = 0; i < list.length; i += 100) {
+      const r = await this.get('/versions', { ids: JSON.stringify(list.slice(i, i + 100)) });
+      const until = Date.now() + 5 * 60 * 1000;
+      for (const v of r || []) this.cache.set(`${this.base}/version/${encodeURIComponent(v.id)}`, { data: v, until });
+    }
   }
 
   /** Релизы проекта. all=true — без фильтра по версии/загрузчику (для просмотра несовместимых). */

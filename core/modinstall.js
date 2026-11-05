@@ -4,11 +4,11 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const { inspectJar } = require('./modcache');
-const { sideFromEnvironment, validateLock, onClient } = require('./lock');
+const { sideFromEnvironment, validateLock, inGame } = require('./lock');
 const { readJson, writeJson } = require('./store');
 
 /** В папку mods кладутся только включённые клиентские моды. */
-const active = (m) => m.enabled !== false && onClient(m);
+const active = (m) => m.enabled !== false && inGame(m);
 
 class ModInstaller {
   /** isBusy(pid) — профиль сейчас используется игрой или сервером. */

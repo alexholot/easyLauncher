@@ -126,6 +126,7 @@ class ChannelStream extends Duplex {
   }
   _read() {}
   _write(chunk, _enc, cb) {
+    if (!chunk.length) return cb(); // пустой кусок: подтверждать нечего — иначе поток встал бы навсегда
     const parts = [];
     for (let i = 0; i < chunk.length; i += CHUNK) parts.push(chunk.subarray(i, i + CHUNK));
     let left = parts.length;
@@ -163,12 +164,24 @@ class RtcHost extends Emitter {
     this.engine = engine;
     this.name = 'direct';
     this.peers = new Map(); // ticket → Peer
+    this.queues = new Map(); // ticket → цепочка обработки сообщений
   }
   start(ctx) {
     this.ctx = ctx;
   }
-  async handle(msg) {
-    if (msg.type !== 'rtc') return;
+  /**
+   * Сообщения одного гостя — строго по очереди. Создание пира ждёт скрытое окно (в первый раз — сотни мс);
+   * кандидаты ICE, пришедшие за это время, раньше уходили к ещё не созданному пиру и терялись —
+   * прямое соединение могло не сойтись и уйти на relay.
+   */
+  handle(msg) {
+    if (msg.type !== 'rtc' || !msg.ticket) return Promise.resolve();
+    const next = (this.queues.get(msg.ticket) || Promise.resolve()).then(() => this.handleNow(msg)).catch((e) => this.emit('error', e));
+    this.queues.set(msg.ticket, next);
+    next.then(() => this.queues.get(msg.ticket) === next && this.queues.delete(msg.ticket));
+    return next;
+  }
+  async handleNow(msg) {
     let p = this.peers.get(msg.ticket);
     if (msg.data?.type === 'offer') {
       p?.close();

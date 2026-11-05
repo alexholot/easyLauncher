@@ -115,6 +115,9 @@ async function planChanges({ lock, request, providers }) {
       continue; // зависимость уже удовлетворена
     }
     if (existing?.pinned && !item.explicit) continue;
+    // готовая сборка (импорт): автор уже положил всё нужное — зависимость, которой нет для этого загрузчика
+    // (мод на несколько загрузчиков указывает библиотеки Fabric и в сборке Forge), установке не мешает
+    const unfit = (e) => (request.trustPack && !item.explicit ? warnings.push({ ...e, code: 'DEP_SKIPPED', message: `${e.message} Зависимость пропущена: готовой сборке она не нужна.` }) : errors.push(e));
     let project = null;
     let version = null;
     try {
@@ -122,7 +125,7 @@ async function planChanges({ lock, request, providers }) {
       if (item.versionId) {
         version = await provider.version(item.projectId, item.versionId);
         if (!compatible(version, target)) {
-          errors.push({ code: 'INCOMPATIBLE', key, message: `${project.name} ${version.number}: ${why(version, target)}.` });
+          unfit({ code: 'INCOMPATIBLE', key, message: `${project.name} ${version.number}: ${why(version, target)}.` });
           continue;
         }
       } else {
@@ -138,12 +141,12 @@ async function planChanges({ lock, request, providers }) {
             version = list[0];
             warnings.push({ code: 'PRERELEASE', key, message: `${project.name}: доступна только ${list[0].type === 'beta' ? 'бета' : 'альфа'}-версия ${list[0].number}.` });
           } else {
-            errors.push({ code: 'PRERELEASE_ONLY', key, message: `${project.name}: для Minecraft ${target.minecraft} есть только тестовые версии. Включи их явно, если готов рискнуть.` });
+            unfit({ code: 'PRERELEASE_ONLY', key, message: `${project.name}: для Minecraft ${target.minecraft} есть только тестовые версии. Включи их явно, если готов рискнуть.` });
             continue;
           }
         }
         if (!version) {
-          errors.push({ code: 'INCOMPATIBLE', key, message: `${project.name}: нет релиза для Minecraft ${target.minecraft} и ${target.loader}.` });
+          unfit({ code: 'INCOMPATIBLE', key, message: `${project.name}: нет релиза для Minecraft ${target.minecraft} и ${target.loader}.` });
           continue;
         }
       }

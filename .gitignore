@@ -1,6 +1,12 @@
 node_modules/
 dist/
 server/.env
+# ключи Epic Online Services — только на компьютере сборки, не в git
+eos.local.json
+eos-sdk/
 .env
 *.log
 .DS_Store
+
+# FFmpeg для установщика скачивает tools/fetch-ffmpeg.js
+ffmpeg-dist/

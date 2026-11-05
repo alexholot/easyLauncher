@@ -2,14 +2,16 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: easyimg: https://cdn.modrinth.com https://media.forgecdn.net https://launchercontent.mojang.com; connect-src 'none'; font-src 'self' data:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: easyimg: https://cdn.modrinth.com https://media.forgecdn.net https://launchercontent.mojang.com; media-src easyimg:; connect-src 'none'; font-src 'self' data:">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>easyLauncher</title>
 <link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="live.css">
 </head>
 <body>
-<!-- живой фон тем (стекло, аврора, неон, закат); в минималистичной теме скрыт -->
-<div class="backdrop" aria-hidden="true"><i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><i class="blob b4"></i><div class="stars"></div><div class="grid-floor"></div><div class="dimmer"></div></div>
+<!-- живой фон: панорама живых тем, ролики «Камеры воспоминаний», пятна стеклянных тем; в минимализме скрыт -->
+<div class="backdrop" aria-hidden="true"><i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><i class="blob b4"></i><div class="stars"></div><div class="grid-floor"></div><canvas class="live-canvas" id="live-canvas"></canvas><div class="live-videos"><video class="live-video" preload="auto" muted playsinline></video><video class="live-video" preload="auto" muted playsinline></video></div><div class="vignette"></div><div class="dimmer"></div></div>
+<div class="grain" aria-hidden="true"></div>
 <div class="shell">
   <header class="titlebar">
     <span class="titlebar-name">easyLauncher</span>
@@ -26,6 +28,7 @@
     <button class="nav-item" data-view="builds"><i data-icon="cube"></i><span>Сборки</span></button>
     <button class="nav-item" data-view="mods"><i data-icon="mods"></i><span>Моды</span></button>
     <button class="nav-item" data-view="worlds"><i data-icon="globe"></i><span>Миры</span></button>
+    <button class="nav-item" data-view="wardrobe"><i data-icon="shirt"></i><span>Гардероб</span></button>
     <button class="nav-item" data-view="friends"><i data-icon="users"></i><span>С друзьями</span><em class="nav-badge" id="friends-badge" hidden>идёт</em></button>
     <button class="nav-item" data-view="settings"><i data-icon="settings"></i><span>Настройки</span></button>
     <div class="sidebar-bottom">
@@ -59,6 +62,14 @@
 <div class="toast" id="toast" role="status" hidden></div>
 <input type="file" id="file-input" accept=".log,.txt" hidden>
 <script src="icons.js"></script>
+<script src="live.js"></script>
+<script src="wardrobe.js"></script>
+<script src="worlds-plus.js"></script>
+<script src="modgraph.js"></script>
+<script src="checks.js"></script>
+<script src="trophies.js"></script>
+<script src="photo.js"></script>
+<script src="voice.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

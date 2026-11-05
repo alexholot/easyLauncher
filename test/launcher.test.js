@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const AdmZip = require('adm-zip');
 const { Launcher } = require('../core/launcher');
+const { offlineUuid } = require('../core/mojang');
 const { parseProperties } = require('../core/server');
 const nbt = require('../core/nbt');
 const { buildFixtures, testLauncher, waitEvent } = require('./helpers');
@@ -129,6 +130,17 @@ test('с друзьями: сервер открывает мир сборки, 
   assert.equal(l.server.state, 'stopped');
   assert.ok(l.server.lines.some((x) => x.includes('Saving worlds')));
   await until(async () => (await l.worlds.holder(p.id, 'valley')) === null);
+
+  // Хозяин всё равно входит по лицензии, но для приглашённых можно явно включить тестовый офлайн-вход.
+  await l.startSession({ profileId: p.id, folder: 'valley', auth: AUTH, eula: true, serverRam: 1, offlineGuests: true });
+  const offlineProps = parseProperties(fs.readFileSync(path.join(l.store.serverDir(p.id), 'server.properties'), 'utf8'));
+  assert.equal(offlineProps.get('online-mode'), 'false');
+  assert.equal(offlineProps.get('white-list'), 'true', 'тестовый режим не отключает белый список');
+  const offlineList = JSON.parse(fs.readFileSync(path.join(l.store.serverDir(p.id), 'whitelist.json'), 'utf8'));
+  const hostHex = offlineUuid(AUTH.name);
+  const hostOfflineId = [hostHex.slice(0, 8), hostHex.slice(8, 12), hostHex.slice(12, 16), hostHex.slice(16, 20), hostHex.slice(20)].join('-');
+  assert.equal(offlineList.find((x) => x.name === AUTH.name)?.uuid, hostOfflineId, 'для офлайн-сервера записан офлайн-UUID, а не UUID лицензии');
+  await l.endSession();
 });
 
 test('с друзьями: новый мир создаётся сервером в saves сборки и виден в списке миров', async (t) => {

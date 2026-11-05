@@ -21,13 +21,15 @@ const channels = [
   'home:info', 'home:updates', 'home:news', 'home:newsBody', 'bg:shot', 'profiles:overview', 'profiles:first', 'profiles:select', 'profiles:details', 'profiles:create', 'profiles:update', 'profiles:delete',
   'profiles:screenshots', 'profiles:export', 'profiles:import', 'profiles:coverPick', 'profiles:coverShot', 'profiles:coverClear',
   'worlds:list', 'worlds:coverPick', 'worlds:coverShot', 'worlds:coverPin', 'worlds:coverClear',
-  'worlds:backups', 'worlds:backup', 'worlds:restore', 'worlds:delete',
-  'mc:versions', 'loaders:versions', 'loaders:support', 'mc:status', 'mc:play', 'mc:cancel', 'mc:stopClient', 'mc:clientLog', 'server:command', 'server:log',
+  'worlds:backups', 'worlds:backup', 'worlds:restore', 'worlds:delete', 'worlds:chronicle', 'worlds:map', 'worlds:mapTile', 'perf:last', 'perf:dismiss', 'challenge:status', 'challenge:catalog', 'challenge:create', 'challenge:accept', 'challenge:abandon', 'challenge:compare', 'memories:film', 'memories:filmFolder',
+  'mc:versions', 'game:probe', 'mods:verify', 'mods:culprit', 'mods:culpritCancel', 'perf:boost', 'trophies:list', 'image:save', 'shots:data', 'shots:info', 'voice:status', 'voice:join', 'voice:leave', 'voice:hotkey', 'voice:test', 'loaders:versions', 'loaders:support', 'mc:status', 'mc:play', 'mc:cancel', 'mc:stopClient', 'mc:clientLog', 'server:command', 'server:log', 'admin:info', 'admin:player', 'admin:world', 'admin:props', 'admin:rules', 'admin:rule', 'admin:restart',
   'catalog:status', 'catalog:search', 'catalog:categories', 'catalog:project',
-  'mods:install', 'mods:plan', 'mods:apply', 'mods:cancel', 'mods:rollback', 'mods:pin', 'mods:enable', 'mods:pickFile',
+  'mods:install', 'mods:plan', 'mods:apply', 'mods:cancel', 'mods:rollback', 'mods:pin', 'mods:enable', 'mods:pickFile', 'mods:icons', 'mods:graph', 'mods:folder', 'mods:folderToggle', 'mods:folderRemove', 'mods:folderOpen',
   'coop:start', 'coop:end', 'room:open', 'room:invite', 'room:invites', 'room:revoke',
   'guest:open', 'guest:prepare', 'guest:connect', 'guest:leave',
-  'ai:status', 'ai:plan', 'ai:install', 'ai:uninstall', 'ai:unload', 'ai:ask', 'ai:run',
+  'ai:status', 'ai:plan', 'ai:install', 'ai:uninstall', 'ai:unload', 'ai:ask', 'ai:reroll', 'ai:run',
+  'skins:list', 'skins:add', 'skins:pick', 'skins:read', 'skins:update', 'skins:remove', 'skins:apply', 'skins:account', 'skins:cape',
+  'memories:status', 'memories:list', 'memories:remove', 'memories:pin', 'memories:plan', 'memories:install', 'memories:uninstall', 'memories:test', 'memories:folder',
   'open:folder', 'open:external', 'clipboard:write',
 ];
 const api = {};
@@ -44,6 +46,11 @@ contextBridge.exposeInMainWorld('easy', {
   onGuestStage: on('guest:stage'),
   onAiProgress: on('ai:progress'),
   onInvite: on('invite:open'),
+  onMemories: on('memories:state'),
+  onMemoriesProgress: on('memories:progress'),
+  // голосовой чат: события (звук, состав) и отправка кадра с микрофона без ожидания ответа
+  onVoice: on('voice:event'),
+  voiceSend: (buf) => buf instanceof Uint8Array && buf.length <= 4000 && ipcRenderer.send('voice:send', buf),
   // масштаб интерфейса (Настройки → Внешний вид)
   zoom: (f) => webFrame.setZoomFactor(Math.min(1.5, Math.max(0.75, Number(f) || 1))),
 });

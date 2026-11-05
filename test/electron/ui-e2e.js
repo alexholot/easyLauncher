@@ -12,7 +12,7 @@ const { _electron } = require('playwright');
 const shots = process.argv[2] || fs.mkdtempSync(path.join(os.tmpdir(), 'easy-shots-'));
 fs.mkdirSync(shots, { recursive: true });
 const root = path.join(__dirname, '..', '..');
-const electron = path.join(root, 'node_modules', 'electron', 'dist', 'electron');
+const electron = path.join(root, 'node_modules', 'electron', 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
 const results = [];
 
 function launch(home, env = {}) {
@@ -174,6 +174,19 @@ function launch(home, env = {}) {
       assert.match(await text('#dialog-body'), /Обновить Sodium 0\.8\.13 → 0\.9\.0/);
       await shot('09-update-plan');
       await w.click('#plan-apply');
+      // проверка после обновления: поддельная игра закрывается, не дойдя до меню, — лаунчер сам возвращает прежний состав
+      await w.waitForSelector('#dialog-title:has-text("С обновлениями игра вылетала")', { timeout: 60000 });
+      assert.match(await text('#dialog-body'), /Прежние версии возвращены/);
+      assert.match(await text('#dialog-body'), /Обновлялись: Sodium/);
+      await shot('09b-update-rolled-back');
+      await w.click('#dialog-body [data-close]');
+      await w.waitForFunction(() => /0\.8\.13/.test(document.querySelector('#tab-body').textContent), null, { timeout: 20000 });
+      step('проверка после обновления: игра не запустилась — прежний Sodium 0.8.13 вернулся сам');
+      // дальше — без проверки, как раньше
+      await w.evaluate(() => window.easy.call('settings:set', { verifyUpdates: false }).then((s) => (S.settings = s)));
+      await w.click('#check-upd');
+      await w.waitForSelector('.plan-steps');
+      await w.click('#plan-apply');
       await w.waitForFunction(() => /0\.9\.0/.test(document.querySelector('#tab-body').textContent), null, { timeout: 20000 });
       step('обновлено до 0.9.0');
       // выключение зависимости — предупреждение
@@ -201,38 +214,51 @@ function launch(home, env = {}) {
       await w.waitForSelector('#h-name');
       await w.fill('#h-name', 'Наш завод');
       await w.check('#h-eula');
+      await w.check('#h-offline');
       await shot('12-friends-setup');
       await w.click('#host-form button[type=submit]');
       await w.waitForSelector('.tag:has-text("Сервер работает")', { timeout: 60000 });
+      await w.click('[data-atab-go="invites"]');
+      await w.waitForSelector('#inv-new');
       await w.click('#inv-new');
       await w.waitForSelector('#inv-out code');
       link = await text('#inv-out code');
       assert.ok(link.startsWith('easylauncher://join?'));
+      // голосовой чат: хозяину панель «Голос» видна, как только сессия открыта
+      await w.waitForSelector('#voice-dock:not([hidden]) #voice-join', { timeout: 10000 });
+      step('хозяин видит кнопку голосового чата');
       await shot('13-session');
       const fhome = fs.mkdtempSync(path.join(os.tmpdir(), 'easy-friend-'));
-      const friend = await launch(fhome, { E2E_PLAYER: 'Friend1', FAKE_CLIENT_MS: '8000' });
+      const friend = await launch(fhome, { E2E_PLAYER: 'Friend1', E2E_LOGGED_OUT: '1', FAKE_CLIENT_MS: '8000' });
       try {
         const f = await friend.firstWindow();
         await f.setViewportSize({ width: 1300, height: 860 }).catch(() => {});
         f.on('pageerror', (e) => errors.push('friend: ' + e.message));
         await f.waitForSelector('.home h1', { timeout: 30000 });
+        await f.evaluate(() => window.easy.call('settings:set', { nickname: 'Friend1', offlineOk: true }));
         await f.click('[data-view="friends"]');
         await f.fill('#join-link', link);
         await f.click('#join-form button[type=submit]');
         await f.waitForSelector('#g-go', { timeout: 20000 });
         const preview = await text('#guest-flow', f);
         assert.ok(/Наш завод/.test(preview) && /Create/.test(preview) && /Fabric API/.test(preview), 'друг видит мир, версию и моды');
+        assert.ok(/разрешил вход без Microsoft/.test(preview) && /Friend1/.test(preview), 'офлайн-гость видит разрешение хозяина и свой ник');
         assert.ok(/Необязательные моды хозяина \(1\)/.test(preview), 'клиентский Sodium хозяина — по желанию');
         await shot('14-friend-invite', f);
         await f.click('#g-go');
-        await f.waitForSelector('#guest-flow .notice.ok', { timeout: 90000 });
+        await f.waitForSelector('#g-leave', { timeout: 90000 });
         const route = (await text('#guest-flow', f)).replace(/\s+/g, ' ');
         step('друг: ' + route.slice(0, 100));
         assert.ok(/напрямую|relay|TURN/.test(route));
+        await f.waitForSelector('#voice-dock:not([hidden]) #voice-join', { timeout: 10000 });
+        step('друг видит кнопку голосового чата');
         await shot('15-friend-joined', f);
+        await f.click('[data-view="builds"]');
+        await f.waitForSelector('.build-group:has-text("Сборки друзей") .card:has-text("Наш завод")');
+        assert.ok(/Хозяин: HostPlayer/.test(await text('.build-group:has-text("Сборки друзей")', f)), 'сборка хозяина сохранена отдельно от личных');
         await w.waitForFunction(() => /Friend1 — подключён/.test(document.querySelector('#main').textContent), null, { timeout: 30000 });
         assert.ok(((await w.textContent('#inv-out').catch(() => '')) || '').includes('easylauncher://join?'), 'ссылка-приглашение не пропала после подключения друга');
-        step('у хозяина: ' + (await w.textContent('.people >> nth=1')).replace(/\s+/g, ' ').trim());
+        step('у хозяина: ' + (await w.textContent('.people')).replace(/\s+/g, ' ').trim());
         await shot('16-host-sees-friend');
       } finally {
         await friend.close();

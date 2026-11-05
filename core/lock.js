@@ -38,6 +38,13 @@ function onClient(e) {
 function onServer(e) {
   return e.side?.server !== 'unsupported';
 }
+/**
+ * Ставится ли мод в папку своей игры. Одиночная игра идёт на встроенном сервере, поэтому серверные
+ * моды (генерация мира, структуры, лут) ей тоже нужны — кроме тех, что работают только на выделенном.
+ */
+function inGame(e) {
+  return onClient(e) || (onServer(e) && !e.side?.dedicated);
+}
 /** Общий мод: обязателен и у сервера, и у клиента — должен точно совпадать у всех участников. */
 function isShared(e) {
   return e.side?.client === 'required' && e.side?.server === 'required';
@@ -57,6 +64,10 @@ function validateLock(lock) {
   // любые версии из манифеста Mojang: 1.21.1, 26.1, 24w14a, b1.7.3, a1.2.6, rd-132211, «1.14 Pre-Release 1»
   if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,47}$/.test(lock.minecraft || '') || /\.\./.test(lock.minecraft)) throw new Error('В составе не указана версия Minecraft.');
   if (!['vanilla', 'fabric', 'quilt', 'forge', 'neoforge'].includes(lock.loader)) throw new Error('Неизвестный загрузчик.');
+  // версия загрузчика идёт в адрес установщика (его лаунчер запускает): только «47.4.28», «0.16.9», «1.20.1-47.1.106»…
+  // — без «/», «..», «?», «#», иначе приглашение могло бы подставить другой файл с того же сайта
+  if (lock.loaderVersion != null && (!/^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/.test(String(lock.loaderVersion)) || /\.\./.test(lock.loaderVersion)))
+    throw new Error('Некорректная версия загрузчика в составе сборки.');
   if (!Array.isArray(lock.mods)) throw new Error('В составе нет списка модов.');
   if (lock.loader === 'vanilla' && lock.mods.length) throw new Error('В Vanilla-профиле не может быть модов.');
   const seen = new Set();
@@ -76,11 +87,26 @@ function validateLock(lock) {
  */
 function roomManifest(lock, room) {
   validateLock(lock);
+  const clientMods = lock.mods.filter((e) => e.enabled !== false && onClient(e));
+  const byKey = new Map(clientMods.map((e) => [e.key, e]));
+  const required = new Set(clientMods.filter((e) => (e.side.client === 'required' || e.side.client === 'unknown') && e.side.server !== 'unsupported').map((e) => e.key));
+  // Библиотека может быть помечена каталогом как optional, но для конкретного мода быть обязательной.
+  // Гостю нужны все обязательные зависимости общих модов, включая цепочки зависимостей.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const key of [...required]) {
+      for (const d of byKey.get(key)?.dependencies || []) {
+        if (d.kind !== 'required' || !byKey.has(d.key) || required.has(d.key)) continue;
+        required.add(d.key);
+        changed = true;
+      }
+    }
+  }
   return {
     format: 'easylauncher.room-manifest/1',
-    room: { name: room.name, minecraft: lock.minecraft, loader: lock.loader, loaderVersion: lock.loaderVersion || null },
-    mods: lock.mods
-      .filter((e) => e.enabled !== false && onClient(e))
+    room: { name: room.name, minecraft: lock.minecraft, loader: lock.loader, loaderVersion: lock.loaderVersion || null, offlineGuests: room.offlineGuests === true },
+    mods: clientMods
       .map((e) => ({
         key: e.key,
         source: e.source,
@@ -93,7 +119,7 @@ function roomManifest(lock, room) {
         dependencies: e.dependencies || [],
         // гостю обязателен мод, который нужен и серверу, и клиенту (или сторона неизвестна);
         // чисто клиентские моды хозяина (графика, интерфейс) для гостя необязательны
-        requiredForGuest: (e.side.client === 'required' || e.side.client === 'unknown') && e.side.server !== 'unsupported',
+        requiredForGuest: required.has(e.key),
       })),
   };
 }
@@ -167,6 +193,7 @@ module.exports = {
   sideFromModrinth,
   sideFromEnvironment,
   onClient,
+  inGame,
   onServer,
   isShared,
   validateLock,

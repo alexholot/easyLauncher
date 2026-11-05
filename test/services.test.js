@@ -89,7 +89,10 @@ test('хозяин с модами и друг по приглашению: се
     assert.ok(prep.compare.ok);
     assert.equal((await friend.store.getProfile(prep.profileId)).kind, 'room');
     assert.equal((await friend.store.getLock(personal.id)).mods.length, 0, 'личная сборка не изменена');
-    assert.ok(!(await friend.overview()).profiles.some((x) => x.kind === 'room'), 'сборка комнаты не смешивается с личными');
+    const roomCard = (await friend.overview()).profiles.find((x) => x.kind === 'room');
+    assert.equal(roomCard?.room?.host, 'HostPlayer', 'сборка друга сохраняется отдельно с именем хозяина');
+    assert.match(roomCard?.name || '', /Сборка друга/);
+    await assert.rejects(friend.planMods(prep.profileId, { remove: ['modrinth:P_CREATE'] }), /Состав сборки друга/);
     // «Подключение»
     const stages = [];
     friend.on('guest-stage', (s) => stages.push(s));
@@ -111,6 +114,27 @@ test('хозяин с модами и друг по приглашению: се
     await host.endCoop();
     assert.equal(host.host, null);
     assert.equal(host.launcher.server.state, 'stopped');
+
+    // Тестовый режим: хозяин лицензирован, гость входит с локальным ником без Microsoft.
+    const off = await host.startCoop({ profileId: pid, folder: r.folder, eula: true, offlineGuests: true }, HOST);
+    const offlineInv = await host.createInvite({ maxUses: 1 });
+    await friend.saveSettings({ nickname: 'OfflineFriend', offlineOk: true });
+    const offlineInfo = await friend.openInvite(offlineInv.link, null);
+    assert.equal(offlineInfo.offlineGuests, true);
+    assert.equal(offlineInfo.playerName, 'OfflineFriend');
+    await friend.prepareGuest([]);
+    const offlineConn = await friend.connectGuest(null);
+    assert.equal(offlineConn.route, 'relay');
+    await waitEvent(friend.launcher, (ev) => ev.type === 'client' && ev.state === 'stopped');
+    const props = fs.readFileSync(path.join(host.store.serverDir(pid), 'server.properties'), 'utf8');
+    assert.match(props, /online-mode=false/);
+    const offlineWhitelist = JSON.parse(fs.readFileSync(path.join(host.store.serverDir(pid), 'whitelist.json'), 'utf8'));
+    assert.equal(offlineWhitelist.find((x) => x.name === 'OfflineFriend')?.uuid, '5c46e278-7680-3913-95c4-06cc40aed47e', 'ник гостя записан с офлайн-UUID');
+    await host.adminPlayer('whitelist-add', HOST.name);
+    const noDuplicates = JSON.parse(fs.readFileSync(path.join(host.store.serverDir(pid), 'whitelist.json'), 'utf8')).filter((x) => x.name.toLowerCase() === HOST.name.toLowerCase());
+    assert.equal(noDuplicates.length, 1, 'повторное добавление того же ника не дублирует белый список');
+    assert.match(off.address, /^127\.0\.0\.1:\d+$/);
+    await host.endCoop();
   } finally {
     delete process.env.FAKE_CLIENT_MS;
     await friend.shutdown();

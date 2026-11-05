@@ -110,6 +110,17 @@ test('аккаунт: вход, шифрованное хранение, обн�
   assert.equal(new Accounts(root, plainVault).status().account, null);
 });
 
+test('аккаунт: без защищённого хранилища токены не записываются на диск', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'easy-acc-unsafe-'));
+  const vault = { available: false, encrypt: () => assert.fail('шифрование не должно вызываться'), decrypt: () => assert.fail('расшифровка не должна вызываться') };
+  const acc = new Accounts(root, vault);
+  acc.store({ refresh_token: 'refresh-secret' }, { accessToken: 'minecraft-secret', expiresAt: Date.now() + 60000, xuid: '', name: 'Player', uuid: 'u', skin: null });
+  assert.equal(acc.status().account.name, 'Player', 'в текущем запуске вход работает');
+  const disk = fs.readFileSync(path.join(root, 'accounts.json'), 'utf8');
+  assert.ok(!disk.includes('refresh-secret') && !disk.includes('minecraft-secret'));
+  assert.equal(new Accounts(root, vault).status().account, null, 'после перезапуска нужен новый вход');
+});
+
 test('аргументы запуска с аккаунтом Microsoft', () => {
   const { buildClientArgs } = require('../core/mojang');
   const v = {

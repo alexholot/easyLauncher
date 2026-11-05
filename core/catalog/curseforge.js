@@ -20,6 +20,48 @@ const SORTS = { relevance: 1, downloads: 6, updated: 3, newest: 11, name: 4 };
 const RELEASE = { 1: 'release', 2: 'beta', 3: 'alpha' };
 const RELATION = { 1: 'embedded', 2: 'optional', 3: 'required', 4: 'tool', 5: 'incompatible', 6: 'include' };
 
+/**
+ * Отпечаток файла CurseForge: MurmurHash2 (seed 1) по байтам файла без пробельных символов (9, 10, 13, 32).
+ * По нему CurseForge находит точный файл мода (POST /v1/fingerprints).
+ */
+function fingerprint(buf) {
+  let n = 0;
+  for (let i = 0; i < buf.length; i++) {
+    const b = buf[i];
+    if (b !== 9 && b !== 10 && b !== 13 && b !== 32) n++;
+  }
+  const d = Buffer.allocUnsafe(n);
+  for (let i = 0, j = 0; i < buf.length; i++) {
+    const b = buf[i];
+    if (b !== 9 && b !== 10 && b !== 13 && b !== 32) d[j++] = b;
+  }
+  const m = 0x5bd1e995;
+  let h = (1 ^ n) >>> 0;
+  let i = 0;
+  for (; i + 4 <= n; i += 4) {
+    let k = d[i] | (d[i + 1] << 8) | (d[i + 2] << 16) | (d[i + 3] << 24);
+    k = Math.imul(k, m);
+    k ^= k >>> 24;
+    k = Math.imul(k, m);
+    h = Math.imul(h, m) ^ k;
+  }
+  switch (n & 3) {
+    case 3:
+      h ^= d[i + 2] << 16;
+    // falls through
+    case 2:
+      h ^= d[i + 1] << 8;
+    // falls through
+    case 1:
+      h ^= d[i];
+      h = Math.imul(h, m);
+  }
+  h ^= h >>> 13;
+  h = Math.imul(h, m);
+  h ^= h >>> 15;
+  return h >>> 0;
+}
+
 function normProject(m) {
   return {
     key: keyOf('curseforge', m.id),
@@ -107,7 +149,16 @@ class CurseForgeProvider {
     if (hit && hit.until > Date.now()) return hit.data;
     let data;
     try {
-      data = await api(url, { method, json, headers: this.direct ? { 'x-api-key': this.apiKey } : {} });
+      // сеть иногда обрывается на полпути (большие сборки — сотни запросов): до двух повторов, кроме ответов «нет»/«нельзя»
+      for (let i = 0; ; i++) {
+        try {
+          data = await api(url, { method, json, headers: this.direct ? { 'x-api-key': this.apiKey } : {} });
+          break;
+        } catch (e) {
+          if (i >= 2 || (e.status && e.status !== 429 && e.status < 500)) throw e;
+          await new Promise((r) => setTimeout(r, 600 * (i + 1)));
+        }
+      }
     } catch (e) {
       if (e.status === 401 || e.status === 403)
         throw Object.assign(new Error('CurseForge отклонил доступ (ошибка авторизации API). Это настройка сервера easyLauncher, а не твоя.'), { code: 'AUTH' });
@@ -153,6 +204,19 @@ class CurseForgeProvider {
     return normProject(await this.rawMod(id));
   }
 
+  /** Несколько модов одним запросом (POST /v1/mods) — для картинок состава сборки. */
+  async projects(ids) {
+    const out = [];
+    for (let i = 0; i < ids.length; i += 50) {
+      const r = await this.get('/v1/mods', null, { method: 'POST', json: { modIds: ids.slice(i, i + 50).map(Number).filter(Number.isInteger) } });
+      for (const m of r.data || []) {
+        this.mods.set(String(m.id), m);
+        out.push(normProject(m));
+      }
+    }
+    return out;
+  }
+
   async versions(id, { minecraft, loader, all = false } = {}) {
     const mod = await this.rawMod(id);
     const params = { pageSize: '50' };
@@ -169,9 +233,32 @@ class CurseForgeProvider {
   }
 
   async byHashes() {
-    // CurseForge сопоставляет файлы по fingerprint (MurmurHash2), а не по SHA-1 — здесь не используется
+    // CurseForge сопоставляет файлы по отпечатку (byFingerprints), а не по SHA-1
     return {};
+  }
+
+  /**
+   * Точные файлы по отпечаткам: { [fingerprint]: { projectId, fileId } }. Нужен прокси с разрешённым
+   * POST /v1/fingerprints/432 (cf-worker/worker.js) — старый прокси отвечает 404, тогда {} без ошибки.
+   */
+  async byFingerprints(fps) {
+    const out = {};
+    const list = [...new Set(fps.filter((x) => Number.isInteger(x) && x >= 0))];
+    for (let i = 0; i < list.length; i += 500) {
+      let r;
+      try {
+        r = await this.get(`/v1/fingerprints/${GAME_MINECRAFT}`, null, { method: 'POST', json: { fingerprints: list.slice(i, i + 500) } });
+      } catch (e) {
+        if (e.code === 'NOT_FOUND') return out;
+        throw e;
+      }
+      for (const x of r.data?.exactMatches || []) {
+        const fp = x.file?.fileFingerprint;
+        if (Number.isInteger(fp)) out[fp] = { projectId: String(x.id ?? x.file.modId), fileId: String(x.file.id) };
+      }
+    }
+    return out;
   }
 }
 
-module.exports = { CurseForgeProvider, normFile, normProject, LOADERS, GAME_MINECRAFT, CLASS_MODS };
+module.exports = { CurseForgeProvider, normFile, normProject, fingerprint, LOADERS, GAME_MINECRAFT, CLASS_MODS };

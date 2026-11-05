@@ -188,12 +188,16 @@ test('обновления: план, закреплённая версия, з�
 
 test('совместимость сборок хозяина и гостя', () => {
   const entry = (key, ver, client, server, sha) => ({ key, source: 'modrinth', projectId: key.split(':')[1], name: key, versionId: ver, version: ver, side: { client, server }, file: { filename: key.split(':')[1] + '.jar', hashes: { sha1: sha.repeat(40).slice(0, 40) } }, dependencies: [] });
-  const host = { format: 'easylauncher.lock/2', minecraft: '1.21.1', loader: 'fabric', loaderVersion: '0.16.9', mods: [entry('modrinth:create', '6', 'required', 'required', 'a'), entry('modrinth:sodium', '1', 'required', 'unsupported', 'b'), entry('modrinth:lithium', '1', 'optional', 'required', 'c')] };
+  const create = entry('modrinth:create', '6', 'required', 'required', 'a');
+  create.dependencies = [{ key: 'modrinth:cloth', kind: 'required' }];
+  const cloth = entry('modrinth:cloth', '11', 'optional', 'optional', 'd');
+  const host = { format: 'easylauncher.lock/2', minecraft: '1.21.1', loader: 'fabric', loaderVersion: '0.16.9', mods: [create, entry('modrinth:sodium', '1', 'required', 'unsupported', 'b'), entry('modrinth:lithium', '1', 'optional', 'required', 'c'), cloth] };
   const manifest = lockLib.roomManifest(host, { name: 'Мир' });
   assert.ok(!manifest.mods.some((m) => m.key === 'modrinth:lithium' && m.requiredForGuest));
+  assert.ok(manifest.mods.find((m) => m.key === 'modrinth:cloth').requiredForGuest, 'обязательная библиотека общего мода нужна гостю, даже если каталог пометил её optional');
   const guest = lockLib.lockFromManifest(manifest, []);
-  assert.deepEqual(guest.mods.map((m) => m.key), ['modrinth:create'], 'без выбора — только обязательные');
-  assert.deepEqual(lockLib.lockFromManifest(manifest, ['modrinth:sodium']).mods.map((m) => m.key).sort(), ['modrinth:create', 'modrinth:sodium']);
+  assert.deepEqual(guest.mods.map((m) => m.key), ['modrinth:create', 'modrinth:cloth'], 'без выбора — общий мод и его обязательная библиотека');
+  assert.deepEqual(lockLib.lockFromManifest(manifest, ['modrinth:sodium']).mods.map((m) => m.key).sort(), ['modrinth:cloth', 'modrinth:create', 'modrinth:sodium']);
   assert.ok(lockLib.compare(manifest, guest).ok);
   const vanillaFriend = { format: 'easylauncher.lock/2', minecraft: '1.21.1', loader: 'vanilla', mods: [] };
   const r = lockLib.compare(manifest, vanillaFriend);

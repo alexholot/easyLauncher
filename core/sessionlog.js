@@ -15,15 +15,60 @@ const RE = {
   screenshot: /Saved screenshot as (\S+?\.(?:png|jpe?g))/i,
 };
 
+// Достижения: английский и русский текст игры (строки chat.type.advancement.* из языковых файлов Mojang)
+const ADVANCEMENT = [
+  [/ has completed the challenge (.+)$/, 'challenge'],
+  [/ завершил испытание (.+)$/, 'challenge'],
+  [/ has reached the goal (.+)$/, 'goal'],
+  [/ достиг цели (.+)$/, 'goal'],
+  [/ has made the advancement (.+)$/, 'advancement'],
+  [/ получил достижение (.+)$/, 'advancement'],
+];
+// служебные сообщения, которые тоже начинаются с ника, но это не смерть
+const NOT_DEATH = /^ ?(?:joined the game|left the game|присоединился к игре|покинул игру|lost connection|\(formerly known as|\(ранее известный как|has the following|is now|теперь|moved too quickly|moved wrongly)/;
+// глаголы смерти — для строк без пометки чата (журнал сервера старых версий)
+const DEATH_WORDS = /\b(?:was (?:slain|shot|killed|blown up|fireballed|pummeled|squashed|impaled|stung|poked|pricked|skewered|struck|frozen|obliterated)|drowned|died|fell|hit the ground|blew up|burned|went up in flames|tried to swim in lava|starved|suffocated|froze to death|withered away|experienced kinetic energy|discovered the floor was lava|walked into)|(?:был убит|был застрелен|был взорван|был заколот|был раздавлен|утонул|разбился|взорвался|умер|сгорел|погиб|решил поплавать в лаве|задохнулся|замёрз|иссох|изжарился|был сражён)/;
+
+/**
+ * Момент игрока из строки журнала: достижение, испытание, цель или смерть. null — не момент.
+ * Строка может быть обычной («[12:00:00] [Server thread/INFO]: System chat: …»), с «[System] [CHAT]» (клиент 1.19+)
+ * или в XML-раскладке log4j (официальная настройка журнала Mojang: текст внутри CDATA).
+ */
+function parseMoment(line, player) {
+  if (!player) return null;
+  let text = String(line).replace(/^.*<!\[CDATA\[/, '').replace(/\]\]>.*$/, '');
+  text = text.replace(/^\s*\[[^\]]*\]\s*\[[^\]]*\]:\s*/, ''); // [время] [поток/уровень]:
+  const chat = /^(?:System chat: |\[System\] \[CHAT\] |\[CHAT\] )/.test(text);
+  text = text.replace(/^(?:System chat: |\[System\] \[CHAT\] |\[CHAT\] )/, '').replace(/§./g, '').trim();
+  if (!text.startsWith(player + ' ')) return null;
+  for (const [re, kind] of ADVANCEMENT) {
+    const m = text.match(re);
+    if (m) return { kind, title: m[1].replace(/^[«"[]+|[»"\]]+$/g, '').trim().slice(0, 80), text: text.slice(0, 200) };
+  }
+  const rest = text.slice(player.length);
+  if (NOT_DEATH.test(rest)) return null;
+  if (chat || DEATH_WORDS.test(rest)) return { kind: 'death', title: rest.trim().slice(0, 80), text: text.slice(0, 200) };
+  return null;
+}
+
 class SessionTracker extends EventEmitter {
-  constructor() {
+  constructor(opts = {}) {
     super();
     this.current = null;
     this.looseShots = [];
+    this.player = opts.player || null;
+    this.lastMoment = { text: '', at: 0 };
   }
 
   feed(line) {
     let m;
+    const moment = parseMoment(line, this.player);
+    // одно и то же событие пишут и сервер («System chat»), и клиент («[CHAT]») — считаем один раз
+    if (moment && !(moment.text === this.lastMoment.text && Date.now() - this.lastMoment.at < 5000)) {
+      this.lastMoment = { text: moment.text, at: Date.now() };
+      this.emit('moment', moment);
+      return;
+    }
     if (RE.spStart.test(line)) {
       this.end();
       this.current = { type: 'singleplayer', level: null, shots: [] };
@@ -36,7 +81,7 @@ class SessionTracker extends EventEmitter {
     }
     if ((m = line.match(RE.screenshot))) {
       const file = m[1];
-      if (this.current?.type === 'singleplayer') this.current.shots.push(file);
+      if (this.current) this.current.shots.push(file); // и на сервере: у хозяина это его мир
       else this.looseShots.push(file);
       this.emit('screenshot', { file, session: this.current?.type || 'menu' });
       return;
@@ -44,6 +89,7 @@ class SessionTracker extends EventEmitter {
     if ((m = line.match(RE.mpConnect))) {
       this.end();
       this.current = { type: 'multiplayer', server: `${m[1]}:${m[2]}`, shots: [] };
+      this.emit('multiplayer', { server: this.current.server });
       return;
     }
     if (this.current?.type === 'singleplayer' && RE.spStop.test(line)) return this.end();
@@ -65,4 +111,4 @@ class SessionTracker extends EventEmitter {
   }
 }
 
-module.exports = { SessionTracker };
+module.exports = { SessionTracker, parseMoment };

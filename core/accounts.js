@@ -17,13 +17,13 @@ class Accounts {
       this.data = { ...this.data, ...JSON.parse(fs.readFileSync(this.file, 'utf8')) };
     } catch {}
     this.secret = null;
-    if (this.data.account?.secret) {
+    if (this.data.account?.secret && this.vault.available) {
       try {
         this.secret = JSON.parse(this.vault.decrypt(Buffer.from(this.data.account.secret, 'base64')));
       } catch {
         this.data.account = null;
       }
-    }
+    } else if (this.data.account) this.data.account = null;
   }
 
   save() {
@@ -63,7 +63,8 @@ class Accounts {
       name: mc.name,
       uuid: mc.uuid,
       skin: mc.skin,
-      secret: Buffer.from(this.vault.encrypt(JSON.stringify(this.secret))).toString('base64'),
+      // Если ОС не даёт защищённое хранилище, токен живёт только до закрытия лаунчера.
+      secret: this.vault.available ? Buffer.from(this.vault.encrypt(JSON.stringify(this.secret))).toString('base64') : null,
     };
     this.save();
   }

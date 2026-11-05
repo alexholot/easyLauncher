@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const { retryFs } = require('./http');
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const writeQueues = new Map();
 
 function newId(prefix) {
   return prefix + '-' + crypto.randomBytes(6).toString('hex');
@@ -34,12 +35,26 @@ async function readJson(file, fallback = null) {
   }
 }
 
-/** Атомарная запись JSON: временный файл + rename. */
-async function writeJson(file, data) {
+/** Атомарная запись JSON. Записи одного файла идут по очереди и не делят временный файл. */
+async function writeJsonNow(file, data) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
-  const tmp = file + '.' + process.pid + '.tmp';
-  await fsp.writeFile(tmp, JSON.stringify(data, null, 2));
-  await retryFs(() => fsp.rename(tmp, file), path.basename(file));
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  try {
+    await fsp.writeFile(tmp, JSON.stringify(data, null, 2));
+    await retryFs(() => fsp.rename(tmp, file), path.basename(file));
+  } finally {
+    await fsp.rm(tmp, { force: true }).catch(() => {});
+  }
+}
+
+function writeJson(file, data) {
+  const key = path.resolve(file);
+  const previous = writeQueues.get(key) || Promise.resolve();
+  const current = previous.catch(() => {}).then(() => writeJsonNow(file, data));
+  writeQueues.set(key, current);
+  return current.finally(() => {
+    if (writeQueues.get(key) === current) writeQueues.delete(key);
+  });
 }
 
 function cleanName(name, fallback) {

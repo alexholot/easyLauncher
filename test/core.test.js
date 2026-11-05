@@ -164,6 +164,36 @@ test('загрузка с проверкой хеша', async () => {
   srv.close();
 });
 
+test('загрузка большого файла не обрывается по общему времени — только по тишине', async () => {
+  const http = require('../core/http');
+  http.setStallMs(300);
+  const parts = [Buffer.from('aaaa'), Buffer.from('bbbb'), Buffer.from('cccc'), Buffer.from('dddd')];
+  const all = Buffer.concat(parts);
+  // медленно, но без пауз длиннее 300 мс: всего ~800 мс — дольше, чем «тишина»
+  const srv = await new Promise((resolve) => {
+    const s = require('http').createServer(async (req, res) => {
+      res.writeHead(200, { 'Content-Length': all.length });
+      if (req.url === '/hang') return res.write(parts[0]); // дальше молчит
+      for (const p of parts) {
+        res.write(p);
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      res.end();
+    });
+    s.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  const dir = tmp();
+  try {
+    assert.equal(await download(base + '/slow', path.join(dir, 'slow'), { size: all.length }), all.length);
+    await assert.rejects(download(base + '/hang', path.join(dir, 'hang'), { size: all.length }), /перестал присылать данные/);
+  } finally {
+    http.setStallMs(30000);
+    srv.closeAllConnections?.();
+    srv.close();
+  }
+});
+
 test('кэш модов: чужие JAR не трогаются, источник и имя файла проверяются', async () => {
   const { ModCache } = require('../core/modcache');
   const dir = tmp();
@@ -178,6 +208,36 @@ test('кэш модов: чужие JAR не трогаются, источни�
   await assert.rejects(cache.ensure({ name: 'Evil', file: { filename: 'e.jar', url: 'https://evil.example/e.jar', hashes: { sha1 } } }), /разрешённых/);
   await assert.rejects(cache.materialize(dir, [{ name: 'Path', file: { filename: '../../x.txt', hashes: { sha1 } } }]), /Недопустимое/);
   await assert.rejects(cache.ensure({ name: 'NoHash', file: { filename: 'n.jar', url: 'https://cdn.modrinth.com/x', hashes: {} } }), /SHA-1/);
+});
+
+test('кэш модов: одинаковые имена JAR не затирают друг друга', async () => {
+  const { ModCache } = require('../core/modcache');
+  const shared = tmp();
+  const dir = tmp();
+  const cache = new ModCache(shared);
+  const entries = ['первый', 'второй'].map((body, i) => {
+    const data = Buffer.from(body);
+    return { name: body, key: 'mod-' + i, file: { filename: 'same.jar', size: data.length, hashes: { sha1: crypto.createHash('sha1').update(data).digest('hex') } }, data };
+  });
+  for (const e of entries) {
+    const file = cache.pathFor(e.file);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, e.data);
+  }
+  const names = await cache.materialize(dir, entries);
+  assert.equal(names.length, 2);
+  assert.equal(new Set(names).size, 2);
+  assert.deepEqual(names.map((n) => fs.readFileSync(path.join(dir, n), 'utf8')).sort(), ['второй', 'первый'].sort());
+});
+
+test('одновременные записи JSON не повреждают файл и не спорят за один временный файл', async () => {
+  const { writeJson } = require('../core/store');
+  const file = path.join(tmp(), 'state.json');
+  await Promise.all(Array.from({ length: 100 }, (_, i) => writeJson(file, { i, text: 'данные-' + i })));
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(saved.i, 99);
+  assert.equal(saved.text, 'данные-99');
+  assert.deepEqual(fs.readdirSync(path.dirname(file)), ['state.json']);
 });
 
 test('options.txt: профиль применяется, ручные настройки сохраняются', async () => {
@@ -279,7 +339,10 @@ test('журнал клиента: мир и скриншоты связываю
   const { SessionTracker } = require('../core/sessionlog');
   const t = new SessionTracker();
   const ends = [];
+  const mp = [];
   t.on('singleplayer-end', (e) => ends.push(e));
+  t.on('multiplayer', (e) => mp.push(['start', e.server]));
+  t.on('multiplayer-end', (e) => mp.push(['end', e.server, e.shots]));
   t.feed('[Render thread/INFO]: [System] [CHAT] Saved screenshot as menu.png');
   t.feed('[Server thread/INFO]: Starting integrated minecraft server version 1.21.1');
   assert.equal(t.playingLevel(), null, 'имя мира ещё неизвестно');
@@ -291,7 +354,9 @@ test('журнал клиента: мир и скриншоты связываю
   t.feed('[Render thread/INFO]: [System] [CHAT] Saved screenshot as mp.png');
   t.end();
   assert.deepEqual(ends, [{ level: 'Мой мир', shots: ['2026-10-26_12.00.00.png'] }]);
-  assert.deepEqual(t.looseShots, ['menu.png', 'mp.png'], 'скриншоты вне одиночного мира — только «скриншоты сборки»');
+  assert.deepEqual(t.looseShots, ['menu.png'], 'скриншоты из меню — только «скриншоты сборки»');
+  // на сервере — свои скриншоты сессии (хозяину на своём сервере сессии они идут в летопись его мира)
+  assert.deepEqual(mp, [['start', 'example.org:25565'], ['end', 'example.org:25565', ['mp.png']]]);
 });
 
 test('перенос миров прежней схемы в saves их сборки', async () => {

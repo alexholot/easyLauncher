@@ -8,8 +8,13 @@ const { createFakeMojang } = require('../fakemojang');
 const { createServer } = require('../../server');
 
 module.exports = async function setup({ svc, accounts }) {
+  // Сквозной тест поднимает свой локальный сервер комнат; локальные секреты EOS разработчика не используем.
+  svc.eosFactory = null;
+  svc.eosPlatform = null;
   const fm = await createFakeMojang({ delayMs: Number(process.env.E2E_DELAY_MS || 25), oldVersions: !!process.env.E2E_OLD });
   http.setFetch((url, o) => fetch(fm.rewrite(url), o));
+  // Тестовый runtime Mojang — sh-сценарий. На Windows используем установленную Java напрямую.
+  if (process.platform === 'win32') svc.launcher.mojang.installJava = async () => ({ java: 'java', javaw: 'java', system: true });
   const mock = await createMock();
   mock.mr.projects.P_CREATE.title = 'Create';
   // тест управляет имитациями из главного процесса (electronApp.evaluate)

@@ -31,7 +31,7 @@ function inspectJar(file) {
     const e = zip.getEntry(n);
     return e ? e.getData().toString('utf8') : null;
   };
-  const out = { ok: true, loaders: [], environment: null, modId: null };
+  const out = { ok: true, loaders: [], environment: null, modId: null, name: null, version: null };
   const fabric = read('fabric.mod.json');
   if (fabric) {
     out.loaders.push('fabric');
@@ -39,12 +39,37 @@ function inspectJar(file) {
       const j = JSON.parse(fabric.replace(/^﻿/, ''));
       out.modId = j.id || null;
       out.environment = j.environment || '*';
+      out.name = typeof j.name === 'string' ? j.name : null;
+      out.version = typeof j.version === 'string' ? j.version : null;
     } catch {}
   }
   const quilt = read('quilt.mod.json');
   if (quilt) out.loaders.push('quilt');
-  if (read('META-INF/mods.toml')) out.loaders.push('forge');
-  if (read('META-INF/neoforge.mods.toml')) out.loaders.push('neoforge');
+  // Forge до 1.13: описание в mcmod.info (JSON-массив или {modList: [...]})
+  const mcmod = read('mcmod.info');
+  if (mcmod && !out.loaders.length) {
+    out.loaders.push('forge');
+    try {
+      const j = JSON.parse(mcmod.replace(/^﻿/, ''));
+      const m = (Array.isArray(j) ? j : j.modList || [])[0] || {};
+      out.modId = m.modid || null;
+      out.name = typeof m.name === 'string' ? m.name : null;
+      out.version = typeof m.version === 'string' && !/\$\{/.test(m.version) ? m.version : null;
+    } catch {}
+  }
+  // название и версия из описания мода Forge/NeoForge: первый [[mods]], «${file.jarVersion}» — из манифеста
+  for (const [file, loader] of [['META-INF/mods.toml', 'forge'], ['META-INF/neoforge.mods.toml', 'neoforge']]) {
+    const toml = read(file);
+    if (!toml) continue;
+    out.loaders.push(loader);
+    const mods = toml.split(/^\s*\[\[mods\]\]\s*$/m)[1] || '';
+    const field = (k) => (mods.match(new RegExp(`^\\s*${k}\\s*=\\s*["']([^"'\\n]*)["']`, 'm')) || [])[1] || null;
+    out.modId = out.modId || field('modId');
+    out.name = out.name || field('displayName');
+    let v = field('version');
+    if (v && /\$\{/.test(v)) v = ((read('META-INF/MANIFEST.MF') || '').match(/^Implementation-Version:\s*(\S+)/m) || [])[1] || null;
+    out.version = out.version || v;
+  }
   return out;
 }
 
@@ -117,7 +142,18 @@ class ModCache {
       managed = JSON.parse(await fsp.readFile(path.join(modsDir, MANAGED), 'utf8')).files || [];
     } catch {}
     const wanted = new Map();
-    for (const e of entries) wanted.set(safeName(e.file.filename), e);
+    for (const e of entries) {
+      const original = safeName(e.file.filename);
+      let name = original;
+      if (wanted.has(name)) {
+        const ext = path.extname(original);
+        const base = path.basename(original, ext);
+        const suffix = String(e.file.hashes?.sha1 || e.versionId || e.key || '').replace(/[^a-z0-9]/gi, '').slice(0, 8) || 'copy';
+        name = safeName(`${base}-${suffix}${ext}`);
+        for (let i = 2; wanted.has(name); i++) name = safeName(`${base}-${suffix}-${i}${ext}`);
+      }
+      wanted.set(name, e);
+    }
     for (const old of managed) {
       if (!wanted.has(old)) await retryFs(() => fsp.rm(path.join(modsDir, safeName(old)), { force: true }), old);
     }

@@ -17,7 +17,12 @@ function openWs(url, token, timeoutMs = 15000, { stream = false } = {}) {
     const duplex = stream ? createWebSocketStream(ws) : null;
     duplex?.on('error', () => {});
     ws.once('open', () => resolve(stream ? duplex : ws));
-    ws.once('unexpected-response', (_req, res) => reject(Object.assign(new Error(`relay отклонил соединение (${res.statusCode})`), { status: res.statusCode })));
+    ws.once('unexpected-response', (_req, res) => {
+      // с этим обработчиком ws сам соединение не закрывает — закрываем, иначе сокет висит
+      res.resume?.();
+      ws.terminate();
+      reject(Object.assign(new Error(`relay отклонил соединение (${res.statusCode})`), { status: res.statusCode }));
+    });
     ws.once('error', reject);
   });
 }

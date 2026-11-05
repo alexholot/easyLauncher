@@ -113,7 +113,6 @@ class RoomRegistry {
     if (inv.allowedNames.length && !inv.allowedNames.includes(playerName.toLowerCase()))
       throw httpError(403, 'Это приглашение выдано другому игроку.');
     if (!room.hostOnline) throw httpError(409, 'Хозяин сейчас не в сети: мир доступен, только пока у него запущен easyLauncher и сервер.');
-    inv.uses++;
     const ticket = b64(24);
     this.tickets.set(ticket, { roomId: room.id, name: playerName, inviteId: inv.id, expiresAt: this.now() + 12 * 3600 * 1000, accepted: false });
     return { ticket, room: { name: room.name, hostName: room.hostName }, manifest: room.manifest };
@@ -123,6 +122,19 @@ class RoomRegistry {
     const g = this.tickets.get(String(t));
     if (!g || g.expiresAt < this.now()) throw httpError(403, 'Билет гостя недействителен.');
     if (!this.rooms.has(g.roomId)) throw httpError(410, 'Комната закрыта.');
+    return g;
+  }
+
+  /** Лимит расходуется только после решения хозяина, а не на просмотр ссылки или отказ. */
+  accept(t) {
+    const g = this.ticket(t);
+    if (g.accepted) return g;
+    const room = this.rooms.get(g.roomId);
+    const inv = room?.invites.get(g.inviteId);
+    if (!inv || inv.revoked || inv.expiresAt < this.now()) throw httpError(410, 'Приглашение больше не действует.');
+    if (inv.uses >= inv.maxUses) throw httpError(410, 'По этому приглашению уже вошли все участники.');
+    inv.uses++;
+    g.accepted = true;
     return g;
   }
 

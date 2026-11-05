@@ -157,6 +157,8 @@ class LocalServer extends EventEmitter {
     this.folder = opts.folder || null;
     this.profileId = opts.profileId || null;
     this.stopRequested = false;
+    this.startedAt = null;
+    this.ramGb = opts.ram;
     const args = [
       `-Xmx${opts.ram}G`,
       `-Xms${Math.min(opts.ram, 1)}G`,
@@ -174,11 +176,14 @@ class LocalServer extends EventEmitter {
     return new Promise((resolve, reject) => {
       let ready = false;
       const onLine = (line) => {
+        // служебные ответы сервера на опросы лаунчера (координаты для объёмного голоса) — не в журнал
+        if (this.quiet && ready && this.quiet(line)) return;
         this.lines.push(line);
         if (this.lines.length > 2000) this.lines.splice(0, 500);
         this.emit('log', line);
         if (!ready && /\bDone \([\d.,]+s\)!/.test(line)) {
           ready = true;
+          this.startedAt = Date.now();
           this.setState('running');
           resolve(this.port);
         }

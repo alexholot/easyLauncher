@@ -1,7 +1,7 @@
 {
   "name": "easylauncher",
   "productName": "easyLauncher",
-  "version": "3.6.1",
+  "version": "4.5.3",
   "description": "Лаунчер Minecraft Java Edition: сборки, каталог модов Modrinth/CurseForge, миры, игра с друзьями, локальный помощник",
   "main": "main.js",
   "author": "easyLauncher",
@@ -9,7 +9,9 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test --test-concurrency=1 --test-timeout=60000 test/*.test.js",
+    "test:ui": "node test/electron/ui-e2e.js",
     "dist": "electron-builder",
+    "predist:win": "node tools/fetch-ffmpeg.js",
     "dist:win": "electron-builder --win",
     "dist:mac": "electron-builder --mac",
     "dist:linux": "electron-builder --linux",
@@ -18,12 +20,17 @@
     "configure": "node tools/configure.js"
   },
   "dependencies": {
-    "adm-zip": "^0.5.16",
+    "adm-zip": "^0.6.1",
+    "koffi": "2.9.0",
     "ws": "^8.22.0"
   },
   "devDependencies": {
+    "@fontsource-variable/manrope": "^5.3.0",
+    "@fontsource-variable/unbounded": "^5.3.0",
     "electron": "^44.9.3",
-    "electron-builder": "^26.0.12"
+    "electron-builder": "^26.0.12",
+    "playwright": "^1.64.1",
+    "skinview3d": "^3.4.2"
   },
   "build": {
     "appId": "app.easylauncher.desktop",
@@ -36,13 +43,17 @@
       "build/icon.png",
       "package.json",
       "!renderer/assets/*.md",
-      "!**/*.map"
+      "!**/*.map",
+      "!node_modules/koffi/build/koffi/!(win32_x64)/**"
     ],
     "win": {
       "target": [
         "nsis"
       ],
-      "icon": "build/icon.ico"
+      "icon": "build/icon.ico",
+      "extraResources": [
+        { "from": "ffmpeg-dist", "to": "ffmpeg", "filter": ["**/*", "!source.json"] }
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -82,6 +93,7 @@
       "buildResources": "build",
       "output": "dist"
     },
+    "afterPack": "tools/after-pack.js",
     "publish": null,
     "electronLanguages": [
       "ru",

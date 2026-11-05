@@ -25,7 +25,10 @@ test.before(async () => {
   };
   const env = { CF_API_KEY: 'SECRET' };
   srv = http.createServer(async (req, res) => {
-    const r = await worker.fetch(new Request('http://worker' + req.url, { method: req.method }), env, {});
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const body = chunks.length ? Buffer.concat(chunks) : undefined;
+    const r = await worker.fetch(new Request('http://worker' + req.url, { method: req.method, body }), env, {});
     res.writeHead(r.status, Object.fromEntries(r.headers));
     res.end(await r.text());
   });
@@ -57,4 +60,52 @@ test('прокси пропускает только чтение каталог
   assert.ok(!body.includes('SECRET'), 'ключ не уходит клиенту');
   const bad = await worker.fetch(new Request('http://w/cf/v1/mods/238222'), { CF_API_KEY: 'wrong' }, {});
   assert.equal(bad.status, 502, 'ошибка ключа на стороне CurseForge не выдаётся за ошибку лаунчера');
+});
+
+test('прокси: пакетные POST — только списки чисел, к CurseForge уходит только нужное поле', async () => {
+  const post = (p, body) => worker.fetch(new Request('http://w' + p, { method: 'POST', body: typeof body === 'string' ? body : JSON.stringify(body) }), { CF_API_KEY: 'SECRET' }, {});
+  const sent = [];
+  const prev = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    sent.push({ url: String(url), body: init.body, method: init.method, key: init.headers['x-api-key'] });
+    return new Response(JSON.stringify({ data: { exactMatches: [] } }), { status: 200 });
+  };
+  try {
+    assert.equal((await post('/cf/v1/fingerprints/432', { fingerprints: [1, 2], extra: 'x' })).status, 200);
+    assert.deepStrictEqual(JSON.parse(sent.at(-1).body), { fingerprints: [1, 2] }, 'лишние поля не пересылаются');
+    assert.equal(sent.at(-1).method, 'POST');
+    assert.equal(sent.at(-1).key, 'SECRET');
+    assert.equal((await post('/cf/v1/mods', { modIds: [238222] })).status, 200);
+    assert.equal((await post('/cf/v1/fingerprints/1', { fingerprints: [1] })).status, 404, 'отпечатки — только Minecraft');
+    assert.equal((await post('/cf/v1/fingerprints/432', { fingerprints: ['x'] })).status, 400);
+    assert.equal((await post('/cf/v1/fingerprints/432', { fingerprints: [] })).status, 400);
+    assert.equal((await post('/cf/v1/fingerprints/432', { fingerprints: Array.from({ length: 501 }, (_, i) => i) })).status, 400);
+    assert.equal((await post('/cf/v1/fingerprints/432', '{oops')).status, 400);
+    assert.equal((await post('/cf/v1/mods/search', { modIds: [1] })).status, 404, 'остальное — только чтение');
+  } finally {
+    globalThis.fetch = prev;
+  }
+});
+
+test('лаунчер: поиск файлов по отпечаткам; старый прокси без POST — без ошибки, пустой ответ', async () => {
+  const cf = new CurseForgeProvider({ backend: base, apiKey: '' });
+  const prev = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).startsWith('https://api.curseforge.com/v1/fingerprints/432'))
+      return new Response(JSON.stringify({ data: { exactMatches: [{ id: 238222, file: { id: 4001, modId: 238222, fileFingerprint: 12345 } }] } }), { status: 200 });
+    return prev(url, init);
+  };
+  try {
+    assert.deepStrictEqual(await cf.byFingerprints([12345, 999]), { 12345: { projectId: '238222', fileId: '4001' } });
+  } finally {
+    globalThis.fetch = prev;
+  }
+  const old = new CurseForgeProvider({ backend: 'http://old', apiKey: '' });
+  const prev2 = globalThis.fetch;
+  globalThis.fetch = async () => new Response('{"error":"not found"}', { status: 404 });
+  try {
+    assert.deepStrictEqual(await old.byFingerprints([1]), {});
+  } finally {
+    globalThis.fetch = prev2;
+  }
 });

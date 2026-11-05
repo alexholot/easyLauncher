@@ -67,7 +67,7 @@ function processRssMb(pid) {
     if (!pid) return resolve(0);
     if (process.platform === 'win32') {
       execFile('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], (err, out) => {
-        const m = !err && out.match(/"([\d\s., ]+)\s*K"/);
+        const m = !err && out.match(/"([\d\s.,\u00a0\u202f]+)[^"\d]*"\s*$/m); // «35,924 K» или «35 924 КБ» в любой кодировке — берём только цифры
         resolve(m ? Math.round(Number(m[1].replace(/[^\d]/g, '')) / 1024) : 0);
       });
     } else {
@@ -218,7 +218,7 @@ class AiManager {
       while (Date.now() < until) {
         if (!this.proc) throw new Error('Процесс модели завершился при загрузке.');
         try {
-          const r = await fetch(`http://127.0.0.1:${port}/health`);
+          const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) });
           if (r.ok) break;
         } catch {}
         await new Promise((r) => setTimeout(r, 300));
@@ -264,6 +264,7 @@ class AiManager {
     this.touch();
     const r = await fetch(`http://127.0.0.1:${this.port}/v1/chat/completions`, {
       method: 'POST',
+      signal: AbortSignal.timeout(120000),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         messages: [

@@ -48,12 +48,22 @@ function cancelled(signal) {
   }
 }
 
-async function request(url, { signal, retries = 3, headers = {} } = {}) {
+/** timeoutMs — на весь запрос вместе с телом; 0 — без общего ограничения (для скачивания файлов). */
+function withTimeout(signal, timeoutMs) {
+  if (!timeoutMs) return signal;
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+/** Сколько ждать следующих данных при скачивании: оборванное соединение ловим по тишине, а не по общему времени. */
+let STALL_MS = 30000;
+
+async function request(url, { signal, retries = 3, headers = {}, timeoutMs = 30000 } = {}) {
   let last;
   for (let i = 0; i <= retries; i++) {
     cancelled(signal);
     try {
-      const r = await fetchImpl(url, { signal, headers: { 'User-Agent': UA, ...headers } });
+      const r = await fetchImpl(url, { signal: withTimeout(signal, timeoutMs), headers: { 'User-Agent': UA, ...headers } });
       if (!r.ok) {
         const e = new Error(`HTTP ${r.status} — ${url}`);
         // 4xx кроме 429 повторять бессмысленно
@@ -66,7 +76,7 @@ async function request(url, { signal, retries = 3, headers = {} } = {}) {
     } catch (e) {
       if (signal?.aborted) cancelled(signal);
       last = e;
-      if (e.fatal) break;
+      if (e.fatal || i === retries) break;
       await new Promise((res) => setTimeout(res, 600 * 2 ** i));
     }
   }
@@ -127,8 +137,16 @@ async function download(url, dest, { sha1, sha512, size, signal, quick, onBytes 
       await fsp.rm(part, { force: true });
       have = 0;
     }
+    // большой файл (модель ИИ, Java) качается дольше любого общего лимита — обрываем только «тишину»
+    const quiet = new AbortController();
+    let stall = null;
+    const poke = () => {
+      clearTimeout(stall);
+      stall = setTimeout(() => quiet.abort(), STALL_MS);
+    };
+    poke();
     try {
-      const r = await request(url, { signal, headers: have ? { Range: `bytes=${have}-` } : {} });
+      const r = await request(url, { signal: signal ? AbortSignal.any([signal, quiet.signal]) : quiet.signal, timeoutMs: 0, headers: have ? { Range: `bytes=${have}-` } : {} });
       const append = have > 0 && r.status === 206;
       if (!append) have = 0;
       // Хеш считаем по всему файлу: при докачке сначала по уже полученной части
@@ -137,6 +155,7 @@ async function download(url, dest, { sha1, sha512, size, signal, quick, onBytes 
       let bytes = have;
       const body = Readable.fromWeb(r.body);
       body.on('data', (c) => {
+        poke();
         bytes += c.length;
         received += c.length;
         hasher?.update(c);
@@ -153,8 +172,10 @@ async function download(url, dest, { sha1, sha512, size, signal, quick, onBytes 
       if (LOCKED.has(e.code)) throw e;
       // Повреждённую часть удаляем; оборванную оставляем для докачки
       if (e.corrupt || e.fatal) await retryFs(() => fsp.rm(part, { force: true })).catch(() => {});
-      last = e;
+      last = quiet.signal.aborted ? new Error(`сервер перестал присылать данные (${Math.round(STALL_MS / 1000)} с без ответа)`) : e;
       if (e.fatal) break;
+    } finally {
+      clearTimeout(stall);
     }
   }
   throw Object.assign(new Error(`Файл ${path.basename(dest)} не скачан: ${last.message}`), { cause: last });
@@ -229,7 +250,7 @@ async function cachedJson(url, file, { sha1, signal, refresh = false } = {}) {
  * Запрос к API с JSON-ответом (без повторов): method, headers, body.
  * Ошибка содержит status и разобранное тело ответа.
  */
-async function api(url, { method = 'GET', headers = {}, body, form, json: payload, signal } = {}) {
+async function api(url, { method = 'GET', headers = {}, body, form, json: payload, signal, timeoutMs = 30000 } = {}) {
   const h = { 'User-Agent': UA, Accept: 'application/json', ...headers };
   if (form) {
     h['Content-Type'] = 'application/x-www-form-urlencoded';
@@ -238,7 +259,14 @@ async function api(url, { method = 'GET', headers = {}, body, form, json: payloa
     h['Content-Type'] = 'application/json';
     body = JSON.stringify(payload);
   }
-  const r = await fetchImpl(url, { method, headers: h, body, signal });
+  let r;
+  try {
+    r = await fetchImpl(url, { method, headers: h, body, signal: withTimeout(signal, timeoutMs) });
+  } catch (e) {
+    if (signal?.aborted) cancelled(signal);
+    if (e.name === 'TimeoutError' || e.name === 'AbortError') throw new Error(`Сервер ${new URL(url).host} не ответил за ${Math.round(timeoutMs / 1000)} с.`);
+    throw e;
+  }
   const text = await r.text();
   let data = null;
   try {
@@ -255,4 +283,9 @@ async function api(url, { method = 'GET', headers = {}, body, form, json: payloa
   return data;
 }
 
-module.exports = { retryFs, setFetch, api, request, json, download, downloadAll, cachedJson, isValid, hashFile, cancelled };
+/** Для тестов: сколько ждать данных при скачивании. */
+function setStallMs(ms) {
+  STALL_MS = ms;
+}
+
+module.exports = { retryFs, setFetch, setStallMs, api, request, json, download, downloadAll, cachedJson, isValid, hashFile, cancelled };

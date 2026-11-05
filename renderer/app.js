@@ -18,7 +18,7 @@ const date = (iso) => (iso ? new Date(iso).toLocaleDateString('ru-RU', { day: 'n
 const LOADERS = { vanilla: 'Vanilla', fabric: 'Fabric', quilt: 'Quilt', forge: 'Forge', neoforge: 'NeoForge' };
 const MODES = { survival: 'Выживание', creative: 'Творчество', adventure: 'Приключение', spectator: 'Наблюдение' };
 const SOURCES = { modrinth: 'Modrinth', curseforge: 'CurseForge' };
-const ROUTES = { direct: 'напрямую', turn: 'через TURN', relay: 'через relay' };
+const ROUTES = { direct: 'напрямую', turn: 'через TURN', relay: 'через relay', 'eos-direct': 'напрямую (Epic)', 'eos-relay': 'через ретранслятор Epic', eos: 'через Epic' };
 const GUEST_STAGE = {
   'waiting-host': 'Ждём подтверждения хозяина',
   'try-direct': 'Пробуем прямое соединение',
@@ -26,6 +26,9 @@ const GUEST_STAGE = {
   'route-direct': 'Соединение напрямую',
   'route-turn': 'Соединение через TURN',
   'route-relay': 'Соединение через relay',
+  'route-eos-direct': 'Соединение напрямую (через Epic Online Services)',
+  'route-eos-relay': 'Соединение через ретранслятор Epic',
+  'route-eos': 'Соединение через Epic Online Services',
   revoked: 'Хозяин отозвал приглашение',
   'host-offline': 'Хозяин вышел из сети',
 };
@@ -53,6 +56,9 @@ const S = {
   assistant: { open: false, feed: [] },
   ai: null,
   aiInstall: null, // идущая загрузка модели {label, done, total}
+  admin: { tab: 'overview', info: null, rules: null, rulesAt: 0, restarting: false, logTimer: null }, // админ-панель сервера хозяина
+  memories: null, // состояние «Камеры воспоминаний» из главного процесса
+  memClips: [], // ролики для живого фона
 };
 const sel = () => S.profiles.find((p) => p.id === S.selected) || null;
 const profile = (pid) => S.profiles.find((p) => p.id === pid) || null;
@@ -76,7 +82,8 @@ function dialog(title, body, wide = false) {
   if ($('#overlay').hidden) lastFocus = document.activeElement;
   $('#dialog-title').textContent = title;
   $('#dialog-body').innerHTML = body;
-  $('.dialog').classList.toggle('wide', wide);
+  $('.dialog').classList.toggle('wide', !!wide);
+  $('.dialog').classList.toggle('xl', wide === 'xl');
   $('#overlay').hidden = false;
   hydrate($('#dialog-body'));
   ($('#dialog-body [autofocus]') || $('#dialog-close')).focus();
@@ -89,6 +96,17 @@ $('#dialog-close').onclick = closeDialog;
 // обработчик не должен возвращать false: это отменило бы клики внутри диалога (чекбоксы, раскрытие блоков)
 $('#overlay').addEventListener('mousedown', (e) => {
   if (e.target.id === 'overlay') closeDialog();
+});
+// Ctrl+A: в поле ввода — как обычно; после щелчка в переписке с помощником — только переписка; иначе ничего
+let lastDown = null;
+document.addEventListener('mousedown', (e) => (lastDown = e.target), true);
+document.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.code !== 'KeyA' || e.altKey) return;
+  const a = document.activeElement;
+  if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable)) return;
+  e.preventDefault();
+  const feed = lastDown?.closest?.('.assistant-feed');
+  if (feed) getSelection().selectAllChildren(feed);
 });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
@@ -170,6 +188,7 @@ async function refresh() {
   S.room = o.room;
   document.documentElement.style.setProperty('--dim', S.settings.dim);
   applyAppearance(S.settings.appearance);
+  syncLive();
   paintChrome();
 }
 
@@ -183,6 +202,20 @@ function applyAppearance(a) {
   const [R, G, B] = [1, 3, 5].map((i) => parseInt(a.accent.slice(i, i + 2), 16) / 255).map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
   r.style.setProperty('--accent-ink', 0.2126 * R + 0.7152 * G + 0.0722 * B > 0.35 ? '#1a1f14' : '#ffffff');
   bridge.zoom?.(a.scale / 100);
+  Live.setScene(a.style, a.theme);
+}
+
+/** Живой фон: ролики камеры (если включены и есть), иначе панорама темы; пока идёт игра — замирает. */
+function syncLive() {
+  Live.setClips(S.memClips, S.settings.memories?.background !== false);
+  Live.setPaused(!!S.status.client);
+}
+async function loadClips() {
+  const before = S.memClips.length;
+  S.memClips = await call('memories:list').catch(() => []);
+  syncLive();
+  // новые ролики после игры — на главной появляется кнопка «Фильм» у сессии
+  if (before && before !== S.memClips.length && S.view === 'play' && $('#overlay').hidden) render();
 }
 async function worldsOf(pid, force = false) {
   if (!pid) return [];
@@ -258,6 +291,9 @@ function render() {
   paintChrome();
   const v = S.view;
   const main = $('#main');
+  document.documentElement.dataset.view = v;
+  if (v !== 'wardrobe') disposeWardrobe();
+  if (v === 'wardrobe') return renderWardrobe(main);
   if (v === 'play') return renderPlay(main);
   if (v === 'builds') return S.builds.detail ? renderBuild(main) : renderBuilds(main);
   if (v === 'mods') return renderMods(main);
@@ -273,7 +309,9 @@ const TIPS = [
   'Перед большими изменениями сборки лаунчер сам делает копии миров. Вернуть мир — «Миры» → мир → «Резервные копии».',
   'Мод можно выключить, не удаляя: переключатель в сборке → «Моды». Он останется в составе, но не загрузится.',
   'Закреплённая версия мода (значок булавки) не меняется при «Обновить всё».',
-  'В «Настройках» можно выбрать тему: жидкое стекло, аврору, неон, закат, пиксель или минимализм.',
+  'В «Настройках» можно выбрать тему: пышную пещеру, ночь у костра, древний город, дневной луг и другие.',
+  '«Камера воспоминаний» на главной записывает короткие ролики из твоей игры — и они становятся фоном лаунчера.',
+  'В «Гардеробе» скин можно покрутить в 3D, примерить плащ и элитры и сменить одним кликом.',
   'В «Настройках» → «Игра» можно задать размер окна Minecraft или полный экран.',
   '«Установить» в каталоге модов само подбирает подходящую версию и нужные зависимости.',
   'Играть с друзьями можно без своего сервера: «С друзьями» → «Начать сессию» → ссылка-приглашение.',
@@ -334,7 +372,7 @@ async function renderPlay(main) {
   const sessions = info?.sessions || [];
   const sessionList = sessions.length
     ? `<ul class="hlist">${sessions
-        .map((x) => `<li><span class="hlist-ic">${icon(x.mode === 'friends' ? 'users' : x.mode === 'guest' ? 'link' : 'play')}</span><span class="grow"><b>${esc(SESSION_MODE[x.mode] || 'Игра')}${x.worlds?.length ? ' · ' + esc(x.worlds.join(', ')) : ''}</b><small>${esc(date(x.at))}, ${new Date(x.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })} · ${esc(hours(x.seconds))}${x.players?.length ? ' · ' + esc(x.players.join(', ')) : ''}</small></span></li>`)
+        .map((x, i) => `<li><span class="hlist-ic">${icon(x.mode === 'friends' ? 'users' : x.mode === 'guest' ? 'link' : 'play')}</span><span class="grow"><b>${esc(SESSION_MODE[x.mode] || 'Игра')}${x.worlds?.length ? ' · ' + esc(x.worlds.join(', ')) : ''}</b><small>${esc(date(x.at))}, ${new Date(x.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })} · ${esc(hours(x.seconds))}${x.players?.length ? ' · ' + esc(x.players.join(', ')) : ''}</small></span>${sessionClips(p.id, x).length >= 2 ? `<button class="btn btn-ghost btn-small" data-film="${i}" title="Склеить ролики этой сессии в один фильм">${icon('camera')}Фильм</button>` : ''}</li>`)
         .join('')}</ul>`
     : '<p class="hint">Здесь будет история: когда играли, сколько, в каком мире и с кем.</p>';
 
@@ -344,7 +382,7 @@ async function renderPlay(main) {
       ${sessionOn() ? `<div class="session-banner">${icon('users')}<span>Идёт сессия с друзьями${S.status.server === 'running' ? '' : ' — сервер запускается'}.</span><button class="btn btn-secondary btn-small" data-go="friends">Открыть</button></div>` : ''}
       <div class="home-top">
         <button class="build-picker" id="build-picker" data-popover aria-haspopup="listbox"><span class="build-thumb" ${bgStyle(coverThumb)}>${coverThumb ? '' : icon('cube')}</span><span><b>${esc(p.name)}</b><small>${esc(buildLabel(p))} · сменить сборку</small></span>${icon('chevron')}</button>
-        ${bg.kind !== 'default' ? `<span class="bg-label">Фон: ${esc(bg.label)}</span>` : ''}
+        <div class="home-top-right">${bg.kind !== 'default' ? `<span class="bg-label">Фон: ${esc(bg.label)}</span>` : ''}<button class="memcam" id="memcam" hidden></button></div>
       </div>
       <div class="home-main">
         <div class="home-hero">
@@ -357,9 +395,11 @@ async function renderPlay(main) {
           ${!p.lastPlayed && !preparing && !running ? `<p class="first-run">Первый запуск: лаунчер скачает Minecraft ${esc(p.minecraft)}${modded ? `, ${esc(LOADERS[p.loader])}` : ''} и подходящую Java. Это займёт несколько минут; дальше игра будет запускаться сразу.</p>` : ''}
           <div class="quick">
             <button class="quick-btn" data-q="friends">${icon('users')}<span>Позвать друзей</span></button>
+            <button class="quick-btn" data-q="challenge">${icon('star')}<span>Вызов другу</span></button>
             ${modded ? `<button class="quick-btn" data-q="mods">${icon('mods')}<span>Добавить моды</span></button>` : `<button class="quick-btn" data-act="create-fabric">${icon('mods')}<span>Сборка с модами</span></button>`}
             <button class="quick-btn" data-q="game">${icon('folder')}<span>Папка игры</span></button>
             <button class="quick-btn" data-q="screenshots">${icon('image')}<span>Скриншоты</span></button>
+            <button class="quick-btn" data-q="boost">${icon('star')}<span>Ускорить</span></button>
             <button class="quick-btn" data-q="settings">${icon('settings')}<span>Настройки сборки</span></button>
           </div>
         </div>
@@ -380,6 +420,8 @@ async function renderPlay(main) {
           <div class="hcard tip"><div class="tip-head"><h2>${icon('info')}Совет</h2><button class="icon-button" id="tip-next" aria-label="Следующий совет" title="Следующий совет">${icon('refresh')}</button></div><p>${esc(TIPS[tipIdx])}</p></div>
         </aside>
       </div>
+      <div class="home-notes"><div class="hcard home-perf" id="home-perf" hidden></div><div class="hcard" id="home-challenge" hidden></div></div>
+      <section class="home-sec" id="home-trophies" hidden></section>
       <section class="home-sec"><div class="sec-head"><h2>Миры этой сборки</h2>${worlds.length ? `<button class="btn btn-ghost btn-small" data-go="worlds">Все миры ${icon('arrow')}</button>` : ''}</div>${worldCards}</section>
       <section class="home-sec"><div class="sec-head"><h2>Последние скриншоты</h2>${shots.length ? `<button class="btn btn-ghost btn-small" data-q="screenshots">Открыть папку ${icon('arrow')}</button>` : ''}</div>${shotStrip}</section>
       <div class="home-two">
@@ -405,11 +447,13 @@ async function renderPlay(main) {
         if (q === 'friends') {
           S.friends.pid = p.id;
           go('friends');
-        } else if (q === 'mods') {
+        } else if (q === 'challenge') challengeDialog();
+        else if (q === 'mods') {
           S.mods.target = p.id;
           S.mods.project = null;
           go('mods');
         } else if (q === 'settings') openBuild(p.id, 'settings');
+        else if (q === 'boost') boostDialog(p.id);
         else call('open:folder', q, p.id).catch((e) => toast(e.message));
       }),
   );
@@ -422,12 +466,152 @@ async function renderPlay(main) {
         play(b.dataset.playOther);
       }),
   );
+  paintMemcam();
+  $('#memcam').onclick = memoriesDialog;
+  $$('[data-film]').forEach((b) => (b.onclick = () => filmDialog(p.id, sessions[Number(b.dataset.film)])));
+  paintPerf(p, n);
+  paintChallenge(n);
+  paintTrophies(n);
   $('#tip-next').onclick = () => {
     S.tip = tipIdx + 1;
     $('.tip p').textContent = TIPS[S.tip % TIPS.length];
   };
   if (modded && p.mods && S.settings.checkUpdates !== false) paintUpdates(p, n);
   if (S.settings.showNews !== false) paintNews(n);
+}
+
+// ---------- «Камера воспоминаний» ----------
+/** Кнопка на главной: всегда честно показывает, включена ли запись и пишет ли она прямо сейчас. */
+function paintMemcam() {
+  const b = $('#memcam');
+  const m = S.memories;
+  if (!b) return;
+  b.hidden = !m?.supported;
+  if (!m?.supported) return;
+  const on = m.settings.record && m.installed;
+  b.dataset.state = m.recording ? 'rec' : m.buffering ? 'buffer' : on ? 'on' : 'off';
+  const sub = m.recording ? 'идёт запись' : m.buffering ? 'ловит моменты' : on ? (m.watching ? (m.nextInMin != null ? `следующий ролик через ~${m.nextInMin} мин игры` : 'следит за игрой') : 'включена · пишет во время игры') : m.settings.record ? 'нужен FFmpeg' : 'выключена';
+  b.title = 'Камера воспоминаний: короткие ролики из твоей игры для фона лаунчера';
+  b.innerHTML = `<span class="memcam-dot" aria-hidden="true"></span><span class="memcam-text"><b>Камера воспоминаний</b><small>${esc(sub)}${m.clips ? ` · ${m.clips} ${plural(m.clips, 'ролик', 'ролика', 'роликов')}` : ''}</small></span>`;
+}
+
+const MOMENT_KIND = { advancement: '★ Достижение', challenge: '★ Испытание', goal: '★ Цель', death: 'Смерть' };
+const MEM_OPTS = [
+  ['interval', 'Как часто', 'Минут активной игры между роликами', [[5, '5 мин'], [10, '10'], [15, '15'], [20, '20'], [30, '30']]],
+  ['length', 'Длина ролика', '', [[10, '10 с'], [15, '15 с'], [20, '20 с']]],
+  ['quality', 'Качество', '1080p весит больше и чуть сильнее нагружает видеокарту', [[720, '720p'], [1080, '1080p']]],
+  ['keep', 'Хранить', 'Старые незакреплённые ролики удаляются сами', [[10, '10'], [15, '15'], [20, '20'], [30, '30']]],
+];
+
+async function setMemories(patch) {
+  S.settings = await call('settings:set', { memories: patch });
+  S.memories = await call('memories:status').catch(() => S.memories);
+  syncLive();
+  paintMemcam();
+}
+
+async function memoriesDialog() {
+  const m = (S.memories = await call('memories:status').catch(() => S.memories));
+  const clips = (S.memClips = await call('memories:list').catch(() => S.memClips));
+  if (!m) return;
+  const s = m.settings;
+  const sw = (id, on, label) => `<button class="switch" role="switch" id="${id}" aria-checked="${on}" aria-label="${esc(label)}"></button>`;
+  const ffBox = !m.installed
+    ? `<div class="notice" id="mem-ff"><strong>Для записи нужен FFmpeg</strong>Бесплатная программа записи видео, около 90 МБ. Скачивается один раз со сборок BtbN/FFmpeg-Builds на GitHub и проверяется по SHA-256.<div class="actions"><button class="btn btn-primary btn-small" id="mem-install">${icon('download')}Скачать FFmpeg</button></div><div id="mem-ff-progress"></div></div>`
+    : `<p class="hint">Кодирование: ${esc(m.encoderLabel || 'ещё не проверено')}${m.encoder && m.encoder !== 'libx264' ? ' — видеокарта, FPS в игре почти не меняется' : m.encoder === 'libx264' ? ' — процессор, на слабом ПК лучше 720p' : ''}.${m.lastError ? ` Последняя ошибка: ${esc(m.lastError)}` : ''}</p><div class="actions"><button class="btn btn-secondary btn-small" id="mem-test">${icon('camera')}Проверить запись</button><button class="btn btn-ghost btn-small" id="mem-folder">${icon('folder')}Папка роликов</button>${m.bundled ? '' : `<button class="btn btn-ghost btn-small" id="mem-uninstall">${icon('trash')}Удалить FFmpeg</button>`}</div><div id="mem-test-out"></div>`;
+  dialog(
+    'Камера воспоминаний',
+    `<p class="lead" style="margin-top:0">Короткие ролики из твоей игры становятся живым фоном лаунчера.</p>
+    <ul class="mem-facts"><li>Пишется <b>только окно Minecraft</b>, когда оно активно, не свёрнуто и ты в мире. Меню и другие программы не попадают.</li><li>Без звука, 30 кадров, ${s.length} секунд раз в ${s.interval} минут игры — и в интересные моменты, если они включены ниже.</li><li>Ролики хранятся только на этом компьютере и никуда не отправляются.</li></ul>
+    <div class="option-row"><span>Записывать моменты для фона<small>Выключено, пока ты сам не включишь</small></span>${sw('mem-record', s.record, 'Записывать моменты для фона')}</div>
+    <div class="option-row"><span>Ловить достижения<small>Достижение, испытание или цель — сразу ролик (не чаще раза в 45 секунд)</small></span>${sw('mem-moments', s.moments, 'Ловить достижения')}</div>
+    <div class="option-row"><span>Ловить смерти<small>Погиб — ролик о том, как это было</small></span>${sw('mem-deaths', s.deaths, 'Ловить смерти')}</div>
+    ${s.moments || s.deaths ? `<p class="hint mem-mode">${m.momentsMode === 'buffer' ? `${icon('check')}<span>В ролик попадут секунды <b>до</b> события: пока ты в мире, видеокарта держит последние ~30 секунд окна игры (по кругу, старое стирается). Нагрузка — около 1% процессора.</span>` : m.momentsMode === 'after' ? `${icon('info')}<span>На этом компьютере ролик начнётся сразу <b>после</b> события: запись «до события» работает только с видеокартой NVIDIA или AMD и одним монитором.</span>` : ''}</p>` : ''}
+    <div class="option-row"><span>Показывать ролики на фоне<small>${clips.length ? 'Ролики идут в случайном порядке с плавной сменой' : 'Пока роликов нет — на фоне панорама темы'}</small></span>${sw('mem-bg', s.background, 'Показывать ролики на фоне')}</div>
+    ${ffBox}
+    <details class="more"><summary>Настройки записи</summary>${MEM_OPTS.map(([key, title, hint, opts]) => `<div class="option-row"><span>${title}${hint ? `<small>${hint}</small>` : ''}</span><div class="segmented" role="group" aria-label="${title}">${opts.map(([v, l]) => `<button data-mem="${key}" data-val="${v}" aria-pressed="${s[key] === v}">${l}</button>`).join('')}</div></div>`).join('')}</details>
+    <div class="sec-head" style="margin-top:14px"><h2>Ролики</h2><span class="tag pixel-tag">${clips.length}</span></div>
+    ${clips.length ? `<div class="mem-grid">${clips
+      .slice()
+      .reverse()
+      .map((c) => `<div class="mem-clip ${c.pinned ? 'pinned' : ''}"><button class="mem-thumb" data-mem-play="${esc(c.id)}" ${c.thumb ? bgStyle(c.thumb) : ''} aria-label="Посмотреть ролик">${icon('play')}<span class="tag pixel-tag">${c.seconds}с</span></button><div class="mem-meta">${c.moment ? `<span class="mem-moment ${c.moment.kind === 'death' ? 'death' : ''}">${esc(MOMENT_KIND[c.moment.kind] || 'Момент')}</span>` : ''}<b title="${esc(c.moment?.title || c.world)}">${esc(c.moment ? (c.moment.kind === 'death' ? c.moment.title : `«${c.moment.title}»`) : c.world || 'Мир')}</b><small>${esc([c.moment ? c.world : '', c.profile, date(c.at)].filter(Boolean).join(' · '))}</small></div><div class="mem-acts"><button class="icon-button" data-mem-pin="${esc(c.id)}" aria-pressed="${!!c.pinned}" title="${c.pinned ? 'Открепить' : 'Закрепить — не удалится при ротации'}" aria-label="${c.pinned ? 'Открепить' : 'Закрепить'}">${icon('pin')}</button><button class="icon-button" data-mem-del="${esc(c.id)}" title="Удалить" aria-label="Удалить ролик">${icon('trash')}</button></div></div>`)
+      .join('')}</div><div id="mem-player"></div>` : `<p class="hint">${s.record ? 'Первый ролик появится после нескольких минут игры в мире.' : 'Включи запись — и после игры здесь появятся ролики.'}</p>`}`,
+    true,
+  );
+  const reopen = () => memoriesDialog();
+  $('#mem-record').onclick = async () => {
+    const want = !s.record;
+    await setMemories({ record: want });
+    if (want && !m.installed) toast('Скачай FFmpeg — без него запись не начнётся.');
+    reopen();
+  };
+  $('#mem-bg').onclick = async () => {
+    await setMemories({ background: !s.background });
+    reopen();
+  };
+  $('#mem-moments').onclick = async () => (await setMemories({ moments: !s.moments }), reopen());
+  $('#mem-deaths').onclick = async () => (await setMemories({ deaths: !s.deaths }), reopen());
+  $$('[data-mem]').forEach((b) => (b.onclick = async () => (await setMemories({ [b.dataset.mem]: Number(b.dataset.val) }), reopen())));
+  if ($('#mem-install'))
+    $('#mem-install').onclick = async () => {
+      $('#mem-install').disabled = true;
+      const out = $('#mem-ff-progress');
+      out.innerHTML = '<p class="hint"><span class="spinner"></span>Узнаём размер…</p>';
+      const off = bridge.onMemoriesProgress((p) => {
+        if (!$('#mem-ff-progress')) return;
+        const pct = p.total ? Math.round((p.done / p.total) * 100) : null;
+        $('#mem-ff-progress').innerHTML = p.phase === 'probe' ? '<p class="hint"><span class="spinner"></span>Ищем самый быстрый кодировщик…</p>' : p.phase === 'extract' ? '<p class="hint"><span class="spinner"></span>Распаковка…</p>' : `<div class="bar ${pct == null ? 'indeterminate' : ''}"><span style="width:${pct ?? 30}%"></span></div><p class="hint">Скачано ${mb(p.done)}${p.total ? ' из ' + mb(p.total) : ''}</p>`;
+      });
+      try {
+        S.memories = await call('memories:install');
+        if (!S.settings.memories?.record) await setMemories({ record: true });
+        toast(`FFmpeg готов: ${S.memories.encoderLabel || 'кодировщик найден'}.`);
+        reopen();
+      } catch (e) {
+        if ($('#mem-ff-progress')) $('#mem-ff-progress').innerHTML = `<div class="notice error">${esc(e.message)}</div>`;
+        if ($('#mem-install')) $('#mem-install').disabled = false;
+      } finally {
+        off();
+        paintMemcam();
+      }
+    };
+  if ($('#mem-test'))
+    $('#mem-test').onclick = async () => {
+      $('#mem-test').disabled = true;
+      $('#mem-test-out').innerHTML = '<p class="hint"><span class="spinner"></span>Записываю 4 секунды этого окна лаунчера, чтобы проверить запись…</p>';
+      try {
+        const r = await call('memories:test');
+        $('#mem-test-out').innerHTML = `<div class="notice ok"><strong>Запись работает</strong>${esc(r.encoderLabel)}, захват ${r.grabber === 'ddagrab' ? 'через видеокарту (Desktop Duplication)' : 'через GDI'}, ${mb(r.size)}.</div><video class="mem-video" src="${img(r.file)}&t=${Date.now()}" autoplay muted loop playsinline></video>`;
+      } catch (e) {
+        $('#mem-test-out').innerHTML = `<div class="notice error">${esc(e.message)}</div>`;
+      } finally {
+        if ($('#mem-test')) $('#mem-test').disabled = false;
+      }
+    };
+  if ($('#mem-folder')) $('#mem-folder').onclick = () => call('memories:folder');
+  if ($('#mem-uninstall'))
+    $('#mem-uninstall').onclick = async () => {
+      if (!confirm('Удалить FFmpeg? Запись выключится, ролики останутся.')) return;
+      await call('memories:uninstall');
+      await setMemories({ record: false });
+      reopen();
+    };
+  $$('[data-mem-play]').forEach(
+    (b) =>
+      (b.onclick = () => {
+        const c = clips.find((x) => x.id === b.dataset.memPlay);
+        if (c) $('#mem-player').innerHTML = `<video class="mem-video" src="${img(c.file)}" autoplay muted controls playsinline></video>`;
+      }),
+  );
+  $$('[data-mem-pin]').forEach((b) => (b.onclick = async () => (await call('memories:pin', b.dataset.memPin, b.getAttribute('aria-pressed') !== 'true'), reopen())));
+  $$('[data-mem-del]').forEach(
+    (b) =>
+      (b.onclick = async () => {
+        await call('memories:remove', b.dataset.memDel);
+        await loadClips();
+        reopen();
+      }),
+  );
 }
 
 /** Карточка «Обновления модов»: проверка идёт после отрисовки, ответ кэшируется в ядре. */
@@ -502,7 +686,7 @@ function shotDialog(p, shots, i, worlds) {
   dialog(
     'Скриншот · ' + date(new Date(x.t).toISOString()),
     `<div class="shot-big" ${bgStyle(x.file)}>${i > 0 ? `<button class="icon-button shot-nav prev" id="sh-prev" aria-label="Предыдущий">${icon('back')}</button>` : ''}${i < shots.length - 1 ? `<button class="icon-button shot-nav next" id="sh-next" aria-label="Следующий">${icon('arrow')}</button>` : ''}</div>
-    <div class="actions"><button class="btn btn-secondary btn-small" id="sh-bg">${icon('image')}Фон лаунчера</button><button class="btn btn-secondary btn-small" id="sh-cover">Обложка сборки</button>${worlds.length ? `<select class="input" id="sh-world" style="max-width:220px" aria-label="Мир для обложки"><option value="">Обложка мира…</option>${worlds.map((w) => `<option value="${esc(w.folder)}">${esc(w.name)}</option>`).join('')}</select>` : ''}<span class="spacer"></span><button class="btn btn-ghost btn-small" id="sh-folder">${icon('folder')}Папка</button></div>`,
+    <div class="actions"><button class="btn btn-primary btn-small" id="sh-photo">${icon('camera')}Фото-режим</button><button class="btn btn-secondary btn-small" id="sh-bg">${icon('image')}Фон лаунчера</button><button class="btn btn-secondary btn-small" id="sh-cover">Обложка сборки</button>${worlds.length ? `<select class="input" id="sh-world" style="max-width:220px" aria-label="Мир для обложки"><option value="">Обложка мира…</option>${worlds.map((w) => `<option value="${esc(w.folder)}">${esc(w.name)}</option>`).join('')}</select>` : ''}<span class="spacer"></span><button class="btn btn-ghost btn-small" id="sh-folder">${icon('folder')}Папка</button></div>`,
     true,
   );
   if ($('#sh-prev')) $('#sh-prev').onclick = () => shotDialog(p, shots, i - 1, worlds);
@@ -523,6 +707,7 @@ function shotDialog(p, shots, i, worlds) {
       toast(e.message);
     }
   };
+  $('#sh-photo').onclick = () => photoDialog(p, x);
   $('#sh-cover').onclick = () => call('profiles:coverShot', p.id, x.file).then(() => done('Обложка сборки обновлена.'), (e) => toast(e.message));
   if ($('#sh-world')) $('#sh-world').onchange = (e) => e.target.value && call('worlds:coverShot', p.id, e.target.value, x.file).then(() => done('Обложка мира обновлена.'), (er) => toast(er.message));
   $('#sh-folder').onclick = () => call('open:folder', 'screenshots', p.id).catch((e) => toast(e.message));
@@ -569,8 +754,12 @@ function buildPopover(anchor) {
   pop.setAttribute('role', 'listbox');
   pop.style.left = r.left + 'px';
   pop.style.top = r.bottom + 6 + 'px';
+  const personal = S.profiles.filter((p) => p.kind !== 'room');
+  const rooms = S.profiles.filter((p) => p.kind === 'room');
+  const buttons = (list, attr) => list.map((p) => `<button role="option" ${attr}="${esc(p.id)}" class="${p.id === S.selected ? 'current' : ''}"><span class="build-thumb" ${bgStyle(p.cover || p.shot)}>${p.cover || p.shot ? '' : icon('cube')}</span><span><b>${esc(p.name)}</b><small>${esc(buildLabel(p))}${p.loader !== 'vanilla' ? ` · ${p.mods} ${plural(p.mods, 'мод', 'мода', 'модов')}` : ''}</small></span></button>`).join('');
   pop.innerHTML =
-    S.profiles.map((p) => `<button role="option" data-pick="${esc(p.id)}" class="${p.id === S.selected ? 'current' : ''}"><span class="build-thumb" ${bgStyle(p.cover || p.shot)}>${p.cover || p.shot ? '' : icon('cube')}</span><span><b>${esc(p.name)}</b><small>${esc(buildLabel(p))}${p.loader !== 'vanilla' ? ` · ${p.mods} ${plural(p.mods, 'мод', 'мода', 'модов')}` : ''}</small></span></button>`).join('') +
+    buttons(personal, 'data-pick') +
+    (rooms.length ? `<div class="popover-label">Сборки друзей</div>${buttons(rooms, 'data-room-build')}` : '') +
     `<button data-pick="__new">${icon('plus')}<span>Новая сборка</span></button>`;
   document.body.appendChild(pop);
   hydrate(pop);
@@ -582,6 +771,7 @@ function buildPopover(anchor) {
         else select(b.dataset.pick);
       }),
   );
+  $$('[data-room-build]', pop).forEach((b) => (b.onclick = () => (closePopover(), openBuild(b.dataset.roomBuild))));
   $('button.current', pop)?.focus();
 }
 
@@ -598,8 +788,9 @@ function loginGate(then) {
   dialog(
     'Как войти в игру',
     `<p>Для Minecraft Java Edition нужен аккаунт Microsoft, на котором куплена игра. Пароль вводится только на сайте Microsoft — лаунчер его не видит.</p>
+    ${S.auth.secure === false ? '<div class="notice warn"><strong>Защищённое хранилище Windows недоступно</strong>Вход сохранится только до закрытия лаунчера. Токены на диск записаны не будут.</div>' : ''}
     <div class="actions"><button class="btn btn-primary" id="gate-login" autofocus>${icon('lock')}Войти через Microsoft</button></div><p class="hint" id="gate-status"></p>
-    <details class="more" id="gate-more"><summary>Играть без входа</summary><p class="hint">Офлайн-профиль: только одиночная игра и игра по локальной сети. На серверы с проверкой аккаунтов (и в «С друзьями») без входа попасть нельзя.</p><form id="gate-offline"><label class="field" for="gate-nick">Никнейм</label><input class="input" id="gate-nick" maxlength="16" pattern="[A-Za-z0-9_]{3,16}" required value="${esc(S.settings.nickname || '')}"><p class="hint">3–16 символов: латиница, цифры и _.</p><div class="actions"><button class="btn btn-secondary" type="submit">Играть без входа</button></div></form></details>`,
+    <details class="more" id="gate-more"><summary>Играть без входа</summary><p class="hint">Офлайн-профиль подходит для одиночной игры. К другу по приглашению можно зайти без Microsoft, если хозяин явно включил тестовый режим.</p><form id="gate-offline"><label class="field" for="gate-nick">Никнейм</label><input class="input" id="gate-nick" maxlength="16" pattern="[A-Za-z0-9_]{3,16}" required value="${esc(S.settings.nickname || '')}"><p class="hint">3–16 символов: латиница, цифры и _.</p><div class="actions"><button class="btn btn-secondary" type="submit">Играть без входа</button></div></form></details>`,
   );
   $('#gate-login').onclick = async () => {
     $('#gate-status').textContent = 'Ждём вход в окне Microsoft…';
@@ -635,6 +826,7 @@ async function play(pid, world = null, server = null, skipLinks = false) {
   try {
     const r = await call('mc:play', { profileId: pid, world, server, skipLinks });
     if (world && r.worldJoin === false) toast('Эта версия Minecraft не умеет входить сразу в мир — откроется главное меню.');
+    else if (r.skinNote) toast(r.skinNote);
   } catch (e) {
     // «Всё равно запустить» — если игрок уверен, что проверка связей ошиблась
     if (e.code === 'MISSING_DEPS') e.retry = () => play(pid, world, server, true);
@@ -653,7 +845,10 @@ bridge.onEvent(async (ev) => {
     S.stage = ev;
     paintProgress();
   } else if (ev.type === 'server') {
-    S.status = { ...S.status, server: ev.state, players: ev.players || [], port: ev.port, serverProfile: ev.profileId, serverFolder: ev.folder, addresses: ev.addresses || [] };
+    S.status = { ...S.status, server: ev.state, players: ev.players || [], port: ev.port, serverProfile: ev.profileId, serverFolder: ev.folder, addresses: ev.addresses || [], lanClosed: !!ev.lanClosed };
+    refreshVoice(); // сессия началась или закончилась — панель голоса появляется или пропадает
+    // новый мир появляется (с названием из level.dat), когда сервер его создал — список миров перечитываем
+    if (ev.state === 'running' && ev.profileId) delete S.worldsCache[ev.profileId];
     if (ev.state === 'stopped') {
       S.worldsCache = {};
       if (ev.failure && !S.busy) errorDialog({ message: ev.failure.message, action: ev.failure.action, code: ev.failure.kind }, 'Сервер остановился');
@@ -664,7 +859,9 @@ bridge.onEvent(async (ev) => {
   } else if (ev.type === 'client') {
     S.status.client = ev.state === 'running';
     S.status.clientProfile = ev.state === 'running' ? ev.profileId : null;
+    syncLive();
     if (ev.state === 'stopped') {
+      loadClips(); // за игру могли появиться новые ролики
       S.worldsCache = {};
       if (ev.mode === 'guest' && S.guest) S.guest.playing = false;
       await refresh().catch(() => {});
@@ -672,6 +869,16 @@ bridge.onEvent(async (ev) => {
       else if (ev.sessionActive) sessionAfterGameDialog();
     }
     render();
+  } else if (ev.type === 'perf') {
+    toast('Лаунчер разобрал, почему игра тормозила — смотри на главной.');
+    if (S.view === 'play') render();
+  } else if (ev.type === 'trophy') {
+    toast(`🏆 ${ev.fresh.length > 1 ? 'Новые трофеи' : 'Новый трофей'}: ${ev.fresh.map((t) => `${t.icon} ${t.title}`).join(', ')}`);
+    if (S.view === 'play') render();
+  } else if (ev.type === 'challenge') {
+    const c = ev.challenge;
+    toast(c.done.inTime ? `Вызов выполнен за ${hours(c.done.seconds)} — уложился!` : `Вызов выполнен за ${hours(c.done.seconds)}.`);
+    if (S.view === 'play') render();
   } else if (ev.type === 'worlds-changed' || ev.type === 'world-session') {
     delete S.worldsCache[ev.profileId];
     if (['worlds', 'play'].includes(S.view)) render();
@@ -681,9 +888,17 @@ bridge.onEvent(async (ev) => {
 });
 bridge.onRoom((st) => {
   S.room = st;
+  refreshVoice();
   if (S.view === 'friends') render();
 });
+bridge.onMemories((st) => {
+  const clipsChanged = S.memories && st.clips !== S.memories.clips;
+  S.memories = st;
+  paintMemcam();
+  if (clipsChanged) loadClips();
+});
 bridge.onGuestStage((s) => {
+  refreshVoice();
   if (!S.guest) return;
   S.guest.stage = s;
   if (s.startsWith('route-')) S.guest.route = s.slice(6);
@@ -724,7 +939,14 @@ async function crashDialog(ev) {
       body += `<p><b>Могу исправить сам:</b></p>${taskSteps(task)}${task.significant ? '<p class="hint">Перед изменением сделаю копии миров этой сборки.</p>' : ''}<div id="fix-progress"></div>`;
     }
   } catch {}
-  dialog(`Minecraft закрылся с ошибкой (код ${ev.code})`, `${body || '<p>Причину по журналу определить не удалось.</p>'}<div class="actions">${task ? '<button class="btn btn-primary" id="crash-fix">Исправить</button>' : ''}<button class="btn btn-secondary" data-log="client">Журнал игры</button><button class="btn btn-ghost" data-close>Закрыть</button></div>`, true);
+  // в сборке с модами — поиск мода-виновника пробными запусками
+  const modded = profile(ev.profileId) && profile(ev.profileId).loader !== 'vanilla' && profile(ev.profileId).kind !== 'room' && profile(ev.profileId).mods > 0;
+  dialog(
+    `Minecraft закрылся с ошибкой (код ${ev.code})`,
+    `${body || '<p>Причину по журналу определить не удалось.</p>'}${modded ? `<p class="hint">Не помогло? «Найти виновника» — лаунчер несколько раз запустит игру с половиной модов и найдёт тот, из-за которого вылет.</p>` : ''}<div class="actions">${task ? '<button class="btn btn-primary" id="crash-fix">Исправить</button>' : ''}${modded ? `<button class="btn ${task ? 'btn-secondary' : 'btn-primary'}" id="crash-find">Найти виновника</button>` : ''}<button class="btn btn-secondary" data-log="client">Журнал игры</button><button class="btn btn-ghost" data-close>Закрыть</button></div>`,
+    true,
+  );
+  if ($('#crash-find')) $('#crash-find').onclick = () => culpritDialog(ev.profileId);
   if (!task) return;
   $('#crash-fix').onclick = async () => {
     $('#crash-fix').disabled = true;
@@ -752,14 +974,18 @@ function coverOf(p) {
   return p.cover || p.shot || null;
 }
 function renderBuilds(main) {
+  const personal = S.profiles.filter((p) => p.kind !== 'room');
+  const rooms = S.profiles.filter((p) => p.kind === 'room');
+  const cards = (list, friend = false) => list
+    .map((p) => {
+      const c = coverOf(p);
+      return `<article class="card ${p.id === S.selected ? 'selected' : ''}"><button class="card-cover ${c ? 'has-image' : ''}" ${bgStyle(c)} data-open="${esc(p.id)}" aria-label="Открыть сборку ${esc(p.name)}">${icon('cube')}${friend ? '<span class="corner tag">Сборка друга</span>' : p.id === S.selected ? '<span class="corner tag green">Выбрана</span>' : ''}</button><div class="card-body"><div class="card-title">${esc(p.name)}</div><div class="card-meta">${friend ? `Хозяин: ${esc(p.room?.host || 'друг')} · ` : ''}${esc(buildLabel(p))}${p.loader !== 'vanilla' ? ` · ${p.mods} ${plural(p.mods, 'мод', 'мода', 'модов')}` : ''}</div><div class="card-actions">${friend ? '' : `<button class="btn btn-primary btn-small" data-play="${esc(p.id)}" ${S.busy || S.status.client ? 'disabled' : ''}>${icon('play')}Играть</button>`}<span class="spacer"></span><button class="btn btn-ghost btn-small" data-open="${esc(p.id)}">Открыть</button></div></div></article>`;
+    })
+    .join('');
   main.innerHTML = `<div class="page">
     <div class="page-head"><div class="grow"><h1>Сборки</h1><p class="lead">Каждая сборка — своя версия игры, свои моды и свои миры.</p></div><button class="btn btn-ghost" id="import">${icon('upload')}Импорт</button><button class="btn btn-primary" id="new">${icon('plus')}Новая сборка</button></div>
-    <div class="grid">${S.profiles
-      .map((p) => {
-        const c = coverOf(p);
-        return `<article class="card ${p.id === S.selected ? 'selected' : ''}"><button class="card-cover ${c ? 'has-image' : ''}" ${bgStyle(c)} data-open="${esc(p.id)}" aria-label="Открыть сборку ${esc(p.name)}">${icon('cube')}${p.id === S.selected ? '<span class="corner tag green">Выбрана</span>' : ''}</button><div class="card-body"><div class="card-title">${esc(p.name)}</div><div class="card-meta">${esc(buildLabel(p))}${p.loader !== 'vanilla' ? ` · ${p.mods} ${plural(p.mods, 'мод', 'мода', 'модов')}` : ''}</div><div class="card-actions"><button class="btn btn-primary btn-small" data-play="${esc(p.id)}" ${S.busy || S.status.client ? 'disabled' : ''}>${icon('play')}Играть</button><span class="spacer"></span><button class="btn btn-ghost btn-small" data-open="${esc(p.id)}">Открыть</button></div></div></article>`;
-      })
-      .join('')}<button class="new-card" id="new2">${icon('plus')}<span>Новая сборка<br><small>Vanilla, Fabric, Quilt, Forge или NeoForge</small></span></button></div></div>`;
+    <section class="build-group"><div class="sec-head"><h2>Твои сборки</h2></div><div class="grid">${cards(personal)}<button class="new-card" id="new2">${icon('plus')}<span>Новая сборка<br><small>Vanilla, Fabric, Quilt, Forge или NeoForge</small></span></button></div></section>
+    ${rooms.length ? `<section class="build-group"><div class="sec-head"><h2>Сборки друзей</h2><p class="hint">Они сохраняются отдельно и обновляются при следующем входе по приглашению.</p></div><div class="grid">${cards(rooms, true)}</div></section>` : ''}</div>`;
   $('#new').onclick = $('#new2').onclick = () => newBuildDialog();
   $('#import').onclick = importBuild;
   $$('[data-open]').forEach((b) => (b.onclick = () => openBuild(b.dataset.open)));
@@ -823,7 +1049,7 @@ async function newBuildDialog(loader = 'vanilla') {
     <div class="row" style="margin-top:8px"><label class="check" style="margin:0"><input type="checkbox" id="nb-snap"><span>Снапшоты</span></label><label class="check" style="margin:0"><input type="checkbox" id="nb-old"><span>Бета и альфа (2010–2011)</span></label></div>
     <p class="hint" id="nb-vhint">${list.length ? '' : 'Нет связи с Mojang — список версий недоступен.'}</p>
     <div id="nb-lv-box" hidden><label class="field" for="nb-lv">Версия загрузчика</label><select class="input" id="nb-lv"></select><p class="hint" id="nb-lv-hint"></p></div>
-    <details class="more"><summary>Дополнительно</summary><p class="hint">Можно импортировать сборку easyLauncher из файла .easypack.</p><div class="actions"><button type="button" class="btn btn-secondary btn-small" id="nb-import">${icon('upload')}Импорт из файла</button></div></details>
+    <details class="more"><summary>Дополнительно</summary><p class="hint">Готовую сборку можно импортировать из файла: Modrinth (.mrpack), CurseForge (.zip) или easyLauncher (.easypack).</p><div class="actions"><button type="button" class="btn btn-secondary btn-small" id="nb-import">${icon('upload')}Импорт из файла</button></div></details>
     <div class="actions"><button class="btn btn-primary" type="submit" id="nb-go">Создать</button><button class="btn btn-ghost" type="button" data-close>Отмена</button></div></form>`,
     true,
   );
@@ -911,15 +1137,51 @@ async function newBuildDialog(loader = 'vanilla') {
 
 async function importBuild() {
   try {
-    const r = await call('profiles:import');
+    // файл выбирается в системном окне; когда выбран — окно ожидания, пока лаунчер разбирает сборку и ищет моды
+    const off = bridge.onModsProgress((p) => {
+      if (p.phase !== 'import') return;
+      if (!$('#import-detail')) dialog('Импорт сборки', '<p>Разбираю сборку: проверяю моды, раскладываю её настройки. Большая сборка — это несколько минут.</p><p class="hint" id="import-detail"></p><div class="bar indeterminate"><span></span></div>');
+      if (p.detail) $('#import-detail').textContent = p.detail;
+    });
+    let r;
+    try {
+      r = await call('profiles:import');
+    } finally {
+      off();
+    }
     if (!r) return;
     await refresh();
-    if (r.plan) planDialog(r.plan, `Импорт «${r.profile.name}»: моды`, { pid: r.profile.id });
-    else toast(`Сборка «${r.profile.name}» импортирована`);
     openBuild(r.profile.id);
+    const note = importReportHtml(r.report);
+    if (r.plan) planDialog(r.plan, `Импорт «${r.profile.name}»: моды`, { pid: r.profile.id, request: r.request, noteHtml: note });
+    else if (note) dialog(`Сборка «${r.profile.name}» импортирована`, `${note}<div class="actions"><button class="btn btn-primary" data-close>Понятно</button></div>`);
+    else {
+      closeDialog();
+      toast(`Сборка «${r.profile.name}» импортирована`);
+    }
   } catch (e) {
     errorDialog(e, 'Импорт не удался');
   }
+}
+
+/** Что сделал импорт: откуда моды, что не нашлось (со ссылками), что пропущено. */
+function importReportHtml(rep) {
+  if (!rep) return '';
+  const parts = [];
+  const n = (k, a, b, c) => `${k} ${plural(k, a, b, c)}`;
+  if (rep.noCurseForge)
+    parts.push(`<div class="notice"><strong>Моды взяты с Modrinth</strong>CurseForge в лаунчере не подключён, поэтому те же моды найдены на Modrinth по названию: ${rep.viaModrinth} из ${rep.total}. Версии подобраны под эту сборку.</div>`);
+  if (rep.unnamed) parts.push(`<div class="notice error">В архиве нет списка названий модов (modlist.html), а без CurseForge их не узнать: ${n(rep.unnamed, 'мод', 'мода', 'модов')} не добавлено.</div>`);
+  const info = [rep.files ? `скачано ещё ${n(rep.files, 'файл', 'файла', 'файлов')} не с Modrinth (сверены по хешу)` : '', rep.overrides ? `разложено ${n(rep.overrides, 'файл', 'файла', 'файлов')} настроек сборки` : ''].filter(Boolean);
+  if (info.length) parts.push(`<p class="hint">${esc(info.join('; '))}.</p>`);
+  if (rep.notFound.length)
+    parts.push(
+      `<details class="import-missing"><summary>Не нашлось: ${rep.notFound.length}</summary><ul>${rep.notFound
+        .map((m) => `<li>${m.url && /^https:\/\/www\.curseforge\.com\//.test(m.url) ? `<a href="#" data-external="${esc(m.url)}">${esc(m.name)}</a>` : esc(m.name)}</li>`)
+        .join('')}</ul><p class="hint">Их можно скачать с сайта и положить в папку модов сборки — лаунчер покажет их в списке.</p></details>`,
+    );
+  if (rep.skipped.length) parts.push(`<details class="import-missing"><summary>Пропущено: ${rep.skipped.length}</summary><ul>${rep.skipped.map((s) => `<li>${esc(s.reason || s.name)}</li>`).join('')}</ul></details>`);
+  return parts.join('');
 }
 
 async function renderBuild(main) {
@@ -937,17 +1199,20 @@ async function renderBuild(main) {
   const c = coverOf(p);
   const tab = S.builds.tab;
   const busy = d.busy;
+  const roomBuild = p.kind === 'room';
+  const tabs = roomBuild ? [['mods', 'Моды'], ['settings', 'Настройки']] : [['mods', 'Моды'], ['worlds', 'Миры'], ['settings', 'Настройки']];
   main.innerHTML = `<div class="page">
     <button class="btn btn-ghost" id="back" style="margin:-8px 0 12px -10px">${icon('back')}Все сборки</button>
-    <div class="detail-head"><div class="detail-cover" ${bgStyle(c)}>${c ? '' : icon('cube')}</div><div style="flex:1;min-width:0"><h1>${esc(p.name)}</h1><div class="row" style="margin-top:6px"><span class="tag">${esc(buildLabel(p))}</span>${p.loader !== 'vanilla' ? `<span class="tag">${d.lock.mods.length} ${plural(d.lock.mods.length, 'мод', 'мода', 'модов')}</span>` : ''}<span class="tag">${d.worlds.length} ${plural(d.worlds.length, 'мир', 'мира', 'миров')}</span>${busy ? '<span class="tag warn">Используется</span>' : ''}</div></div><button class="btn btn-primary" id="play-build" ${S.busy || S.status.client ? 'disabled' : ''}>${icon('play')}Играть</button></div>
-    <div class="tabs" role="tablist">${[['mods', 'Моды'], ['worlds', 'Миры'], ['settings', 'Настройки']].map(([k, t]) => `<button role="tab" data-tab="${k}" aria-selected="${tab === k}">${t}</button>`).join('')}</div>
+    <div class="detail-head"><div class="detail-cover" ${bgStyle(c)}>${c ? '' : icon('cube')}</div><div style="flex:1;min-width:0"><h1>${esc(p.name)}</h1><div class="row" style="margin-top:6px">${roomBuild ? '<span class="tag">Сборка друга</span>' : ''}<span class="tag">${esc(buildLabel(p))}</span>${p.loader !== 'vanilla' ? `<span class="tag" id="mods-count">${p.mods} ${plural(p.mods, 'мод', 'мода', 'модов')}</span>` : ''}${roomBuild ? `<span class="tag">Хозяин: ${esc(p.room?.host || 'друг')}</span>` : `<span class="tag">${d.worlds.length} ${plural(d.worlds.length, 'мир', 'мира', 'миров')}</span>`}${busy ? '<span class="tag warn">Используется</span>' : ''}</div></div>${roomBuild ? '<button class="btn btn-secondary" data-go="friends">Войти по приглашению</button>' : `<button class="btn btn-primary" id="play-build" ${S.busy || S.status.client ? 'disabled' : ''}>${icon('play')}Играть</button>`}</div>
+    ${roomBuild ? '<div class="notice"><strong>Это сохранённая сборка друга</strong>Она не смешивается с твоими сборками. Состав обновится, когда ты снова откроешь приглашение хозяина.</div>' : ''}
+    <div class="tabs" role="tablist">${tabs.map(([k, t]) => `<button role="tab" data-tab="${k}" aria-selected="${tab === k}">${t}</button>`).join('')}</div>
     <div id="tab-body"></div></div>`;
   $('#back').onclick = () => go('builds');
-  $('#play-build').onclick = async () => {
-    await select(pid);
-    S.view = 'play';
-    play(pid);
-  };
+  if ($('#play-build')) $('#play-build').onclick = async () => {
+      await select(pid);
+      S.view = 'play';
+      play(pid);
+    };
   $$('[data-tab]').forEach(
     (b) =>
       (b.onclick = () => {
@@ -973,9 +1238,40 @@ function sideText(side) {
 function buildModsTab(body, d) {
   const p = d.profile;
   const busy = d.busy;
+  if (p.kind === 'room') {
+    const f = S.builds.filter.toLowerCase();
+    const mods = d.lock.mods.filter((m) => !f || m.name.toLowerCase().includes(f));
+    body.innerHTML = `<div class="toolbar"><label class="search"><span class="sr-only">Поиск среди установленных</span>${icon('search')}<input class="input" id="inst-filter" placeholder="Поиск среди установленных" value="${esc(S.builds.filter)}"></label></div>${d.lock.mods.length ? `<div class="list">${mods.map((m) => `<div class="mod-row"><span class="mod-icon">${esc(m.name.slice(0, 1).toUpperCase())}</span><div class="mod-main"><div class="mod-name">${esc(m.name)}${m.addedBy === 'dependency' ? '<span class="tag">зависимость</span>' : ''}</div><div class="mod-sub">${esc(m.version)} · ${esc(SOURCES[m.source] || m.source)} · ${sideText(m.side)}</div></div><div class="mod-actions"><button class="icon-button" title="Схема зависимостей" aria-label="Схема зависимостей ${esc(m.name)}" data-graph="${esc(m.key)}">${icon('graph')}</button></div></div>`).join('') || '<p class="hint">Ничего не найдено.</p>'}</div>` : '<div class="empty"><h3>Сборка без модов</h3><p>У друга обычный Minecraft без модов.</p></div>'}`;
+    const fi = $('#inst-filter');
+    fi.oninput = () => {
+      S.builds.filter = fi.value;
+      buildModsTab(body, d);
+      $('#inst-filter')?.focus();
+    };
+    $$('[data-graph]', body).forEach((b) => (b.onclick = () => openModGraph(p.id, b.dataset.graph)));
+    return;
+  }
   if (p.loader === 'vanilla') {
-    body.innerHTML = `<div class="empty"><h3>Это сборка Vanilla</h3><p>Моды работают через загрузчик: Fabric, Quilt, Forge или NeoForge. Можно перевести эту сборку на загрузчик (во вкладке «Настройки») или создать отдельную сборку с модами.</p><div class="actions"><button class="btn btn-primary" id="to-fabric" ${busy ? 'disabled' : ''}>Перевести на Fabric</button><button class="btn btn-secondary" data-act="create-fabric">Новая сборка с модами</button></div></div>`;
-    $('#to-fabric').onclick = () => openPlan(p.id, { retarget: { loader: 'fabric' } }, 'Перевести на Fabric', { retarget: true });
+    // любой загрузчик, а не только Fabric; которых нет для этой версии игры — неактивны с объяснением
+    const ids = ['fabric', 'quilt', 'forge', 'neoforge'];
+    body.innerHTML = `<div class="empty"><h3>Это сборка Vanilla</h3><p>Моды работают через загрузчик. Выбери, на какой перевести эту сборку, — лаунчер покажет, что изменится, и сделает копии миров. Или создай отдельную сборку с модами.</p>
+      <div class="loader-grid to-loader">${ids.map((l) => `<button class="loader-card" data-to-loader="${l}" ${busy ? 'disabled' : ''}><b>${LOADERS[l]}</b><small>${esc(LOADER_HINT[l])}</small></button>`).join('')}</div>
+      <p class="hint" id="to-loader-note">Проверяем, какие загрузчики есть для Minecraft ${esc(p.minecraft)}…</p>
+      <div class="actions"><button class="btn btn-secondary" data-act="create-build">Новая сборка с модами</button></div></div>`;
+    $$('[data-to-loader]').forEach((b) => (b.onclick = () => openPlan(p.id, { retarget: { loader: b.dataset.toLoader } }, `Перевести на ${LOADERS[b.dataset.toLoader]}`, { retarget: true })));
+    Promise.all(ids.map((l) => call('loaders:support', l).then((v) => [l, v], () => [l, null]))).then((res) => {
+      if (!$('#to-loader-note')) return;
+      const none = [];
+      for (const [l, versions] of res) {
+        if (!versions || versions.includes(p.minecraft)) continue; // неизвестно (нет сети) — пусть решит план
+        none.push(LOADERS[l]);
+        const b = $(`[data-to-loader="${l}"]`);
+        b.disabled = true;
+        b.title = `${LOADERS[l]} не выходил для Minecraft ${p.minecraft}`;
+        b.querySelector('small').textContent = `Нет для Minecraft ${p.minecraft}`;
+      }
+      $('#to-loader-note').textContent = none.length === ids.length ? `Для Minecraft ${p.minecraft} нет ни одного загрузчика модов — создай сборку на другой версии.` : none.length ? `Для Minecraft ${p.minecraft} нет: ${none.join(', ')}.` : '';
+    });
     return;
   }
   const f = S.builds.filter.toLowerCase();
@@ -988,12 +1284,15 @@ function buildModsTab(body, d) {
         ? `<div class="list">${mods
             .map((m) => {
               const on = m.enabled !== false;
-              return `<div class="mod-row ${on ? '' : 'off'}"><span class="mod-icon">${esc(m.name.slice(0, 1).toUpperCase())}</span><div class="mod-main"><div class="mod-name">${esc(m.name)}${m.addedBy === 'dependency' ? '<span class="tag">зависимость</span>' : ''}${m.pinned ? '<span class="tag">версия закреплена</span>' : ''}${on ? '' : '<span class="tag warn">выключен</span>'}</div><div class="mod-sub">${esc(m.version)} · ${esc(SOURCES[m.source] || m.source)} · ${sideText(m.side)}</div></div>
-          <div class="mod-actions"><button class="switch" role="switch" aria-checked="${on}" aria-label="${on ? 'Выключить' : 'Включить'} ${esc(m.name)}" data-toggle="${esc(m.key)}" ${busy ? 'disabled' : ''}></button><button class="icon-button" title="${m.pinned ? 'Открепить версию' : 'Закрепить версию: не обновлять'}" aria-pressed="${!!m.pinned}" data-pin="${esc(m.key)}" ${busy ? 'disabled' : ''} style="${m.pinned ? 'color:var(--accent)' : ''}">${icon('pin')}</button><button class="icon-button" title="Обновить" data-upd="${esc(m.key)}" ${busy || m.pinned ? 'disabled' : ''}>${icon('refresh')}</button><button class="icon-button" title="Удалить" data-remove="${esc(m.key)}" ${busy ? 'disabled' : ''}>${icon('trash')}</button></div></div>`;
+              return `<div class="mod-row ${on ? '' : 'off'}"><span class="mod-icon" data-mod-icon="${esc(m.key)}">${modIconInner(p.id, m)}</span><div class="mod-main"><div class="mod-name">${esc(m.name)}${m.addedBy === 'dependency' ? '<span class="tag">зависимость</span>' : ''}${m.pinned ? '<span class="tag">версия закреплена</span>' : ''}${on ? '' : '<span class="tag warn">выключен</span>'}</div><div class="mod-sub">${esc(m.version)} · ${esc(SOURCES[m.source] || m.source)} · ${sideText(m.side)}</div></div>
+          <div class="mod-actions"><button class="icon-button" title="Схема зависимостей" aria-label="Схема зависимостей ${esc(m.name)}" data-graph="${esc(m.key)}">${icon('graph')}</button><button class="switch" role="switch" aria-checked="${on}" aria-label="${on ? 'Выключить' : 'Включить'} ${esc(m.name)}" data-toggle="${esc(m.key)}" ${busy ? 'disabled' : ''}></button><button class="icon-button" title="${m.pinned ? 'Открепить версию' : 'Закрепить версию: не обновлять'}" aria-pressed="${!!m.pinned}" data-pin="${esc(m.key)}" ${busy ? 'disabled' : ''} style="${m.pinned ? 'color:var(--accent)' : ''}">${icon('pin')}</button><button class="icon-button" title="Обновить" data-upd="${esc(m.key)}" ${busy || m.pinned ? 'disabled' : ''}>${icon('refresh')}</button><button class="icon-button" title="Удалить" data-remove="${esc(m.key)}" ${busy ? 'disabled' : ''}>${icon('trash')}</button></div></div>`;
             })
             .join('') || '<p class="hint">Ничего не найдено.</p>'}</div>`
         : `<div class="empty"><h3>Модов пока нет</h3><p>Открой каталог — моды подбираются под ${esc(buildLabel(p))}, зависимости ставятся сами.</p><div class="actions"><button class="btn btn-primary" id="add-mods2">Открыть каталог модов</button></div></div>`
-    }`;
+    }
+    <div id="folder-mods"></div>`;
+  paintModIcons(p.id);
+  paintFolder(p, d);
   const toCatalog = () => {
     S.mods.target = p.id;
     S.mods.hits = null;
@@ -1057,6 +1356,125 @@ function buildModsTab(body, d) {
       }),
   );
   $$('[data-remove]').forEach((b) => (b.onclick = () => openPlan(p.id, { remove: [b.dataset.remove] }, 'Удалить мод')));
+  $$('[data-graph]', body).forEach((b) => (b.onclick = () => openModGraph(p.id, b.dataset.graph)));
+}
+
+// ---------- моды, которые игрок положил в папку mods сам ----------
+S.folderMods = {}; // pid → [{file, name, version, enabled, wrongLoader, notMod, otherTarget}]
+let folderSync = null;
+/**
+ * Свести папку со сборкой и показать «свои» файлы. Узнанные на Modrinth моды лаунчер забирает в сборку
+ * (тогда список перерисовывается целиком), остальные — отдельным блоком под списком.
+ */
+async function paintFolder(p, d, force = false) {
+  S.folderCtx = { p, d };
+  drawFolder(p, d);
+  if (folderSync) return; // уже сверяем — второй раз папку параллельно не трогаем
+  // поиск по модам перерисовывает вкладку на каждую букву — папку при этом заново не сверяем
+  if (!force && S.folderAt?.pid === p.id && Date.now() - S.folderAt.t < 4000) return;
+  S.folderAt = { pid: p.id, t: Date.now() };
+  folderSync = call('mods:folder', p.id).catch(() => null);
+  const r = await folderSync;
+  folderSync = null;
+  if (!r || S.view !== 'builds' || S.builds.detail !== p.id) return;
+  const was = JSON.stringify(S.folderMods[p.id] || []);
+  S.folderMods[p.id] = r.local;
+  if (r.adopted.length || r.replaced.length) {
+    const names = [...r.adopted.map((x) => x.name), ...r.replaced.map((x) => `${x.name} ${x.to}`)];
+    toast(`${names.length === 1 ? 'Мод из папки добавлен в сборку' : 'Моды из папки добавлены в сборку'}: ${names.join(', ')}`);
+    await refresh();
+    return render();
+  }
+  if (was !== JSON.stringify(r.local) && S.builds.tab === 'mods') drawFolder(p, d);
+  // счётчик в шапке — без перерисовки страницы (не сбивается поиск по модам)
+  const n = d.lock.mods.length + r.local.length;
+  if ($('#mods-count')) $('#mods-count').textContent = `${n} ${plural(n, 'мод', 'мода', 'модов')}`;
+}
+
+function drawFolder(p, d) {
+  const box = $('#folder-mods');
+  if (!box) return;
+  const f = S.builds.filter.toLowerCase();
+  const all = S.folderMods[p.id] || [];
+  const list = all.filter((m) => !f || m.name.toLowerCase().includes(f) || m.file.toLowerCase().includes(f));
+  if (!list.length) return (box.innerHTML = '');
+  const busy = d.busy;
+  const warn = (m) =>
+    m.notMod ? '<span class="tag warn">не похоже на мод</span>' : m.wrongLoader ? `<span class="tag warn">не для ${esc(LOADERS[p.loader] || p.loader)}</span>` : m.otherTarget ? '<span class="tag warn">для другой версии игры</span>' : '';
+  box.innerHTML = `<div class="folder-head"><div><h3>Добавлены в папку вручную</h3><p class="hint">Эти файлы не узнали ни Modrinth, ни CurseForge (или они для другой версии) — игра загрузит их как есть, но лаунчер не обновляет их и не проверяет зависимости. Моды, которые каталоги узнают, лаунчер сам добавляет в сборку.</p></div><button class="btn btn-ghost btn-small" id="folder-open">${icon('folder')}Папка модов</button></div>
+    <div class="list">${
+      list
+        .map(
+          (m) => `<div class="mod-row ${m.enabled ? '' : 'off'}"><span class="mod-icon">${esc(m.name.slice(0, 1).toUpperCase())}</span><div class="mod-main"><div class="mod-name">${esc(m.name)}<span class="tag">из папки</span>${m.enabled ? '' : '<span class="tag warn">выключен</span>'}${warn(m)}</div><div class="mod-sub">${m.version ? `${esc(m.version)} · ` : ''}${esc(m.file)}</div></div>
+      <div class="mod-actions"><button class="switch" role="switch" aria-checked="${m.enabled}" aria-label="${m.enabled ? 'Выключить' : 'Включить'} ${esc(m.name)}" data-ftoggle="${esc(m.file)}" ${busy ? 'disabled' : ''}></button><button class="icon-button" title="Убрать в корзину" aria-label="Убрать ${esc(m.name)} в корзину" data-fremove="${esc(m.file)}" ${busy ? 'disabled' : ''}>${icon('trash')}</button></div></div>`,
+        )
+        .join('')
+    }</div>`;
+  $('#folder-open').onclick = () => call('mods:folderOpen', p.id).catch(errorDialog);
+  $$('[data-ftoggle]', box).forEach(
+    (b) =>
+      (b.onclick = async () => {
+        try {
+          await call('mods:folderToggle', p.id, b.dataset.ftoggle, b.getAttribute('aria-checked') !== 'true');
+          paintFolder(p, d, true);
+        } catch (e) {
+          errorDialog(e);
+        }
+      }),
+  );
+  $$('[data-fremove]', box).forEach(
+    (b) =>
+      (b.onclick = () => {
+        const m = all.find((x) => x.file === b.dataset.fremove);
+        dialog('Убрать мод?', `<p>Файл «${esc(m.file)}» переместится в корзину Windows — его можно будет вернуть оттуда.</p><div class="actions"><button class="btn btn-primary" id="fr-go">Убрать в корзину</button><button class="btn btn-ghost" data-close>Отмена</button></div>`);
+        $('#fr-go').onclick = async () => {
+          try {
+            await call('mods:folderRemove', p.id, m.file);
+            closeDialog();
+            toast(`«${m.name}» убран в корзину`);
+            paintFolder(p, d, true);
+          } catch (e) {
+            errorDialog(e);
+          }
+        };
+      }),
+  );
+}
+// вернулся в лаунчер (например, из Проводника, куда положил мод) — сверяем папку открытой сборки
+addEventListener('focus', () => {
+  if (S.view !== 'builds' || S.builds.tab !== 'mods' || !$('#folder-mods') || S.folderCtx?.p.id !== S.builds.detail) return;
+  paintFolder(S.folderCtx.p, S.folderCtx.d, true);
+});
+
+// ---------- картинки модов в составе сборки ----------
+S.modIcons = {}; // pid → {key: url|null}
+const letterOf = (m) => esc(String(m.name || '?').slice(0, 1).toUpperCase());
+function modIconInner(pid, m) {
+  const u = S.modIcons[pid]?.[m.key];
+  return u ? `<img src="${esc(u)}" alt="" loading="lazy" data-letter="${letterOf(m)}">` : letterOf(m);
+}
+/** Картинка не загрузилась — снова буква (обработчик вешается из кода: CSP не пускает onerror в разметке). */
+function guardIcons(root = document) {
+  $$('.mod-icon img[data-letter]', root).forEach((im) => {
+    if (im.dataset.guard) return;
+    im.dataset.guard = '1';
+    im.addEventListener('error', () => (im.parentElement.textContent = im.dataset.letter));
+  });
+}
+async function paintModIcons(pid) {
+  guardIcons();
+  // всё уже известно (картинка или её отсутствие) — не спрашиваем; новый мод в составе — спрашиваем снова
+  const known = S.modIcons[pid];
+  if (known && $$('[data-mod-icon]').every((el) => el.dataset.modIcon in known)) return;
+  const map = await call('mods:icons', pid).catch(() => null);
+  if (!map) return;
+  S.modIcons[pid] = map;
+  // без перерисовки вкладки: не сбивается фокус в поиске по модам
+  $$('[data-mod-icon]').forEach((el) => {
+    const u = map[el.dataset.modIcon];
+    if (u && !el.querySelector('img')) el.innerHTML = `<img src="${esc(u)}" alt="" loading="lazy" data-letter="${esc(el.textContent.trim())}">`;
+  });
+  guardIcons();
 }
 
 async function buildSettingsTab(body, d) {
@@ -1064,14 +1482,23 @@ async function buildSettingsTab(body, d) {
   const busy = d.busy;
   const total = S.sys.totalRamGiB || 8;
   const ramMax = Math.max(2, total - 2);
+  const skins = await call('skins:list').catch(() => ({ items: [] }));
+  const skinGone = p.skinId && !skins.items.some((x) => x.id === p.skinId);
   body.innerHTML = `<div class="two-col"><div class="panel">
     <h2>Основное</h2>
     <form id="bs"><label class="field" for="bs-name">Название</label><input class="input" id="bs-name" maxlength="60" value="${esc(p.name)}">
     <label class="field" for="bs-ram">Память для игры</label>${ramField('bs-ram', p.ram, { max: ramMax, auto: d.budget.client, presets: [2, 4, 6, 8, 12, 16] })}<p class="hint">ОЗУ компьютера: ${total} ГБ. Сборкам с большим числом модов нужно больше памяти.</p>
+    <label class="field" for="bs-skin">Скин в этой сборке</label><select class="input" id="bs-skin" ${p.kind === 'room' ? 'disabled' : ''}><option value="">Как в гардеробе</option>${skins.items.map((x) => `<option value="${esc(x.id)}" ${x.id === p.skinId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+    <p class="hint">${skinGone ? 'Образ этой сборки удалён из гардероба — выбери другой. ' : ''}${skins.items.length ? 'С входом в Microsoft лаунчер перед запуском наденет этот скин в профиль Minecraft. Без входа в игре виден стандартный скин.' : 'Добавь образы в «Гардеробе» — и для каждой сборки можно будет выбрать свой.'}</p>
     <div class="actions"><button class="btn btn-primary" type="submit">Сохранить</button></div></form>
     <details class="more"><summary>Версия игры и загрузчик</summary><p class="hint">Сейчас: ${esc(buildLabel(p))}. При смене версии лаунчер подберёт совместимые релизы модов, покажет, что изменится, и сделает копии миров.</p><label class="field" for="bs-ver">Версия Minecraft</label><select class="input" id="bs-ver" ${busy || p.kind === 'room' ? 'disabled' : ''}>${await versionOptions(p.minecraft)}</select><label class="field" for="bs-loader">Загрузчик</label><select class="input" id="bs-loader" ${busy || p.kind === 'room' ? 'disabled' : ''}>${Object.keys(LOADER_HINT).map((l) => `<option value="${l}" ${l === p.loader ? 'selected' : ''}>${LOADERS[l]} — ${LOADER_HINT[l]}</option>`).join('')}</select><p class="hint">Моды одного загрузчика обычно не работают в другом: при смене лаунчер подберёт версии модов под новый загрузчик, а несовместимые покажет.</p><div class="notice">Открывать мир в более старой версии игры, чем та, в которой он сохранён, опасно — он может повредиться.</div></details>
     </div><div class="panel"><h2>Обложка сборки</h2><p class="hint">По умолчанию — последний скриншот из этой сборки. Своя обложка закрепляется и сама не меняется.</p><div class="detail-cover" style="width:100%;height:150px;margin-top:12px" ${bgStyle(coverOf(p))}>${coverOf(p) ? '' : icon('image')}</div><p class="hint">${p.cover ? 'Своя обложка (закреплена)' : p.shot ? 'Последний скриншот сборки' : 'Скриншотов пока нет'}</p>
     <div class="actions"><button class="btn btn-secondary btn-small" id="pc-pick">${icon('image')}Своя картинка</button><button class="btn btn-secondary btn-small" id="pc-shot">Из скриншотов</button>${p.cover ? '<button class="btn btn-ghost btn-small" id="pc-clear">Убрать</button>' : ''}</div>
+    ${
+      p.kind !== 'room'
+        ? `<h2 style="margin-top:22px">Скорость и проверка</h2><p class="hint">«Ускорить» — лаунчер узнает компьютер и подберёт моды оптимизации, память и графику. «Проверить запуск» — сам запустит игру, дождётся главного меню и закроет её. Если игра вылетает при запуске — найдёт мод-виновника: несколько раз запустит игру с половиной модов, не меняя состав сборки.</p><div class="actions"><button class="btn btn-primary btn-small" id="bs-boost" ${busy ? 'disabled' : ''}>${icon('star')}Ускорить сборку</button><button class="btn btn-secondary btn-small" id="bs-probe" ${busy || S.status.client ? 'disabled' : ''}>${icon('play')}Проверить запуск</button>${p.loader !== 'vanilla' ? `<button class="btn btn-ghost btn-small" id="bs-culprit" ${busy || S.status.client ? 'disabled' : ''}>${icon('search')}Найти виновника вылета</button>` : ''}</div>`
+        : ''
+    }
     <h2 style="margin-top:22px">Файлы</h2><div class="actions"><button class="btn btn-ghost btn-small" data-folder="game">${icon('folder')}Папка игры</button><button class="btn btn-ghost btn-small" data-folder="mods">Моды</button><button class="btn btn-ghost btn-small" data-folder="screenshots">Скриншоты</button><button class="btn btn-ghost btn-small" id="export">${icon('download')}Экспорт сборки</button></div>
     <details class="more"><summary>Удалить сборку</summary><p class="hint">Перед удалением лаунчер сохранит копии всех её миров (${d.worlds.length}) в папку резервных копий.</p><label class="field" for="bs-del">Для подтверждения введи название сборки</label><input class="input" id="bs-del" placeholder="${esc(p.name)}"><div class="actions"><button class="btn btn-danger btn-small" id="bs-delete" ${busy ? 'disabled' : ''}>Удалить сборку</button></div></details></div></div>`;
   hydrate(body);
@@ -1081,7 +1508,7 @@ async function buildSettingsTab(body, d) {
     try {
       const ram = readRam('bs-ram', ramMax);
       if (ram.error) return ($('#bs-ram-err').textContent = ram.error);
-      await call('profiles:update', p.id, { name: $('#bs-name').value, ram: ram.value });
+      await call('profiles:update', p.id, { name: $('#bs-name').value, ram: ram.value, ...(p.kind === 'room' ? {} : { skinId: $('#bs-skin').value || null }) });
       await refresh();
       toast('Сохранено');
       render();
@@ -1118,6 +1545,9 @@ async function buildSettingsTab(body, d) {
     render();
   }
   $$('[data-folder]').forEach((b) => (b.onclick = () => call('open:folder', b.dataset.folder, p.id)));
+  if ($('#bs-probe')) $('#bs-probe').onclick = () => probeDialog(p.id);
+  if ($('#bs-boost')) $('#bs-boost').onclick = () => boostDialog(p.id);
+  if ($('#bs-culprit')) $('#bs-culprit').onclick = () => culpritDialog(p.id);
   $('#export').onclick = async () => {
     const r = await call('profiles:export', p.id).catch(errorDialog);
     if (r) toast(`Сборка сохранена в файл: ${r.mods} ${plural(r.mods, 'мод', 'мода', 'модов')} (файлы модов скачаются при импорте)`);
@@ -1126,7 +1556,7 @@ async function buildSettingsTab(body, d) {
     try {
       const r = await call('profiles:delete', p.id, $('#bs-del').value);
       toast(r.backedUp.length ? `Сборка удалена. Копии миров сохранены: ${r.backedUp.join(', ')}` : 'Сборка удалена');
-      if (!(await call('profiles:overview')).profiles.length) await call('profiles:first');
+      if (!(await call('profiles:overview')).profiles.some((x) => x.kind !== 'room')) await call('profiles:first');
       await refresh();
       go('builds');
     } catch (err) {
@@ -1189,7 +1619,7 @@ function planDialog(plan, title, ctx = {}) {
       dialog(title, `<p>${ctx.request?.update ? 'Всё актуально: новых совместимых версий нет.' : 'Изменений нет.'}</p>${plan.warnings.map((x) => `<div class="notice">${esc(x.message)}</div>`).join('')}<div class="actions"><button class="btn btn-primary" data-close>Закрыть</button></div>`);
       return;
     }
-    dialog(title, `${ctx.explanation ? `<p>${esc(ctx.explanation)}</p>` : ''}${planHtml(plan)}<div id="apply-progress"></div><div class="actions"><button class="btn btn-primary" id="plan-apply" ${plan.ok && (plan.changes.length || ctx.retarget) ? '' : 'disabled'}>Применить</button><button class="btn btn-ghost" id="plan-cancel">Отмена</button></div>`, true);
+    dialog(title, `${ctx.explanation ? `<p>${esc(ctx.explanation)}</p>` : ''}${ctx.noteHtml || ''}${planHtml(plan)}<div id="apply-progress"></div><div class="actions"><button class="btn btn-primary" id="plan-apply" ${plan.ok && (plan.changes.length || ctx.retarget) ? '' : 'disabled'}>Применить</button><button class="btn btn-ghost" id="plan-cancel">Отмена</button></div>`, true);
     $('#plan-cancel').onclick = closeDialog;
     $$('[data-prerelease]').forEach(
       (b) =>
@@ -1244,6 +1674,8 @@ function planDialog(plan, title, ctx = {}) {
         markInstalled(plan);
         await refresh();
         render();
+        // обновили моды — пробный запуск: если игра вылетит, прежние версии вернутся сами
+        if (!r.missing?.length && plan.changes.some((c) => c.type === 'update') && S.settings.verifyUpdates !== false) verifyAfterUpdate(pid);
       } catch (e) {
         $('#apply-progress').innerHTML = `<div class="notice error">${esc(e.message)}</div>`;
         $('#plan-cancel').textContent = 'Закрыть';
@@ -1275,7 +1707,7 @@ function markInstalled(plan) {
 
 async function renderMods(main) {
   // моды ставятся только в сборки с загрузчиком: Vanilla в списке «Устанавливать в» не нужна
-  const modded = S.profiles.filter((p) => p.loader !== 'vanilla');
+  const modded = S.profiles.filter((p) => p.kind !== 'room' && p.loader !== 'vanilla');
   if (!modded.some((p) => p.id === S.mods.target)) S.mods.target = modded.find((p) => p.id === S.selected)?.id || modded[0]?.id || null;
   const target = profile(S.mods.target);
   if (!target) {
@@ -1350,6 +1782,7 @@ async function renderMods(main) {
 async function loadCategories() {
   const src = S.mods.source;
   if (!S.mods.cats[src]) S.mods.cats[src] = await call('catalog:categories', src).catch(() => []);
+  if (src !== S.mods.source) return;
   const el = $('#mod-cat');
   if (!el) return;
   el.innerHTML = '<option value="">Все категории</option>' + S.mods.cats[src].map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
@@ -1466,6 +1899,7 @@ async function installOne(source, id, pid) {
 
 async function renderProject(main, targetBar) {
   const { source, id, all } = S.mods.project;
+  const targetId = S.mods.target;
   const backLabel = S.mods.query ? `К результатам «${esc(S.mods.query)}»` : 'К каталогу';
   main.innerHTML = `<div class="page"><button class="btn btn-ghost" id="back" style="margin:-8px 0 12px -10px">${icon('back')}${backLabel}</button>${targetBar}<div id="proj">${skeletons(1, 90)}${skeletons(3, 40)}</div></div>`;
   const back = () => {
@@ -1484,10 +1918,11 @@ async function renderProject(main, targetBar) {
   try {
     r = await call('catalog:project', source, id, S.mods.target, { allVersions: all });
   } catch (e) {
-    $('#proj').innerHTML = `<div class="notice error">${esc(e.message)}</div>`;
+    if (S.mods.project?.source === source && S.mods.project.id === id && S.mods.target === targetId && $('#proj'))
+      $('#proj').innerHTML = `<div class="notice error">${esc(e.message)}</div>`;
     return;
   }
-  if (!S.mods.project || S.mods.project.id !== id) return;
+  if (!S.mods.project || S.mods.project.source !== source || S.mods.project.id !== id || S.mods.target !== targetId || !$('#proj')) return;
   const { project: p, versions, state } = r;
   const target = profile(S.mods.target);
   const busy = S.status.client && S.status.clientProfile === target.id;
@@ -1508,10 +1943,11 @@ async function renderProject(main, targetBar) {
 
 // ---------- «Миры» ----------
 async function renderWorlds(main) {
-  if (!S.worlds.pid || !profile(S.worlds.pid)) S.worlds.pid = S.selected;
+  const personal = S.profiles.filter((p) => p.kind !== 'room');
+  if (!S.worlds.pid || !personal.some((p) => p.id === S.worlds.pid)) S.worlds.pid = S.selected;
   const pid = S.worlds.pid;
   main.innerHTML = `<div class="page"><div class="page-head"><div class="grow"><h1>Миры</h1><p class="lead">Миры хранятся внутри своей сборки, поэтому их нельзя случайно открыть несовместимой версией игры.</p></div></div>
-    <div class="target-bar"><span>Сборка</span><select class="input" id="w-build" aria-label="Сборка">${S.profiles.map((p) => `<option value="${esc(p.id)}" ${p.id === pid ? 'selected' : ''}>${esc(p.name)} — ${esc(buildLabel(p))}</option>`).join('')}</select></div><div id="w-grid">${skeletons(2, 120)}</div></div>`;
+    <div class="target-bar"><span>Сборка</span><select class="input" id="w-build" aria-label="Сборка">${personal.map((p) => `<option value="${esc(p.id)}" ${p.id === pid ? 'selected' : ''}>${esc(p.name)} — ${esc(buildLabel(p))}</option>`).join('')}</select></div><div id="w-grid">${skeletons(2, 120)}</div></div>`;
   $('#w-build').onchange = (e) => {
     S.worlds.pid = e.target.value;
     render();
@@ -1541,7 +1977,7 @@ function worldsGrid(el, pid, list) {
     .map((w) => {
       const c = worldCover(w);
       const flag = w.hosted ? '<span class="corner tag green">Открыт для друзей</span>' : w.playing ? '<span class="corner tag green">Сейчас в игре</span>' : w.damaged ? '<span class="corner tag red">level.dat не читается</span>' : '';
-      return `<article class="card"><button class="card-cover ${c ? 'has-image' : ''}" ${bgStyle(c)} data-world="${esc(w.folder)}" aria-label="Мир ${esc(w.name)}: обложка и копии">${icon('globe')}${flag}</button><div class="card-body"><div class="card-title" title="${esc(w.name)}">${esc(w.name)}</div><div class="card-meta">${esc([MODES[w.gamemode], w.hardcore ? 'хардкор' : '', w.version ? 'версия ' + w.version : ''].filter(Boolean).join(' · '))}</div><div class="card-meta">${w.lastPlayed ? 'Играли ' + esc(date(w.lastPlayed)) : ''}</div><div class="card-actions"><button class="btn btn-primary btn-small" data-wplay="${esc(w.folder)}" ${S.busy || S.status.client || w.hosted || w.damaged ? 'disabled' : ''}>${icon('play')}Играть</button><span class="spacer"></span><button class="icon-button" data-world="${esc(w.folder)}" aria-label="Настройки мира ${esc(w.name)}">${icon('more')}</button></div></div></article>`;
+      return `<article class="card"><button class="card-cover ${c ? 'has-image' : ''}" ${bgStyle(c)} data-world="${esc(w.folder)}" aria-label="Мир ${esc(w.name)}: летопись, карта, машина времени">${icon('globe')}${flag}</button><div class="card-body"><div class="card-title" title="${esc(w.name)}">${esc(w.name)}</div><div class="card-meta">${esc([MODES[w.gamemode], w.hardcore ? 'хардкор' : '', w.version ? 'версия ' + w.version : ''].filter(Boolean).join(' · '))}</div><div class="card-meta">${w.lastPlayed ? 'Играли ' + esc(date(w.lastPlayed)) : ''}</div><div class="card-actions"><button class="btn btn-primary btn-small" data-wplay="${esc(w.folder)}" ${S.busy || S.status.client || w.hosted || w.damaged ? 'disabled' : ''}>${icon('play')}Играть</button><span class="spacer"></span><button class="icon-button" data-world="${esc(w.folder)}" data-world-tab="manage" aria-label="Настройки мира ${esc(w.name)}" title="Обложка и копии">${icon('more')}</button></div></div></article>`;
     })
     .join('')}</div><p class="hint" style="margin-top:14px">«Играть» в мире откроет ${esc(p ? p.name : 'сборку')} и сразу войдёт в мир. Новые миры создаются в игре.</p>`;
   hydrate(el);
@@ -1553,16 +1989,21 @@ function worldsGrid(el, pid, list) {
         play(pid, b.dataset.wplay);
       }),
   );
-  $$('[data-world]', el).forEach((b) => (b.onclick = () => worldDialog(pid, b.dataset.world)));
+  // картинка мира — летопись, «⋯» (настройки мира) — сразу обложка и копии
+  $$('[data-world]', el).forEach((b) => (b.onclick = () => worldDialog(pid, b.dataset.world, b.dataset.worldTab || 'chronicle')));
 }
 
-async function worldDialog(pid, folder) {
+/** Вкладка «Обложка и копии» окна мира (остальные вкладки — в worlds-plus.js). */
+async function worldManage(pid, folder) {
   const w = (await worldsOf(pid, true)).find((x) => x.folder === folder);
   if (!w) return toast('Мир не найден');
   const backups = await call('worlds:backups', pid, folder).catch(() => []);
   const c = worldCover(w);
   const coverText = w.cover ? (w.cover.source === 'manual' ? 'Выбрана вручную' : 'Последний скриншот, сделанный в этом мире') + (w.cover.pinned ? ' · закреплена' : ' · обновляется сама после игры') : w.icon ? 'Значок мира из игры' : 'Нет обложки';
-  dialog(
+  worldTabs(
+    pid,
+    folder,
+    'manage',
     w.name,
     `<div class="detail-cover" style="width:100%;height:190px" ${bgStyle(c)}>${c ? '' : icon('globe')}</div><p class="hint">${esc(coverText)}</p>
     <div class="actions"><button class="btn btn-secondary btn-small" id="wc-pick">${icon('image')}Своя картинка</button><button class="btn btn-secondary btn-small" id="wc-shot">Из скриншотов сборки</button>${w.cover ? `<button class="btn btn-ghost btn-small" id="wc-pin">${w.cover.pinned ? 'Открепить' : 'Закрепить'}</button><button class="btn btn-ghost btn-small" id="wc-clear">Убрать</button>` : ''}</div>
@@ -1570,11 +2011,10 @@ async function worldDialog(pid, folder) {
     <h3 style="margin-top:20px">Резервные копии</h3><div class="actions" style="margin-top:8px"><button class="btn btn-secondary btn-small" id="wb-now" ${w.playing ? 'disabled' : ''}>Сделать копию сейчас</button><button class="btn btn-ghost btn-small" id="wb-folder">${icon('folder')}Папка копий</button><button class="btn btn-ghost btn-small" id="w-folder">Папка мира</button></div>
     <div class="list" style="margin-top:10px">${backups.map((b) => `<div class="mod-row"><div class="mod-main"><div class="mod-name">${esc(b.reasonText)}</div><div class="mod-sub">${new Date(b.createdAt).toLocaleString('ru-RU')} · ${mb(b.size)}</div></div><button class="btn btn-ghost btn-small" data-restore="${esc(b.id)}" ${w.hosted || w.playing ? 'disabled' : ''}>Восстановить</button></div>`).join('') || '<p class="hint">Копий пока нет. Они делаются сами перед изменением сборки и удалением.</p>'}</div>
     <details class="more"><summary>Удалить мир</summary><p class="hint">Перед удалением лаунчер сохранит копию.</p><label class="field" for="wd-name">Для подтверждения введи название мира</label><input class="input" id="wd-name" placeholder="${esc(w.name)}"><div class="actions"><button class="btn btn-danger btn-small" id="wd-go" ${w.hosted || w.playing ? 'disabled' : ''}>Удалить мир</button></div></details>`,
-    true,
   );
   const again = async () => {
     delete S.worldsCache[pid];
-    await worldDialog(pid, folder);
+    await worldManage(pid, folder);
     if (['worlds', 'builds', 'play'].includes(S.view)) render();
   };
   $('#wc-pick').onclick = async () => {
@@ -1601,7 +2041,7 @@ async function worldDialog(pid, folder) {
     (b) =>
       (b.onclick = () => {
         dialog('Восстановить мир из копии?', '<p>Текущее состояние мира сначала тоже сохранится в копию — его можно будет вернуть.</p><div class="actions"><button class="btn btn-primary" id="rs-go">Восстановить</button><button class="btn btn-ghost" id="rs-no">Отмена</button></div>');
-        $('#rs-no').onclick = () => worldDialog(pid, folder);
+        $('#rs-no').onclick = () => worldManage(pid, folder);
         $('#rs-go').onclick = async () => {
           try {
             await call('worlds:restore', pid, folder, b.dataset.restore);
@@ -1639,26 +2079,28 @@ function coopOk(mc) {
 
 async function renderFriends(main) {
   if (sessionOn()) return renderSession(main);
-  if (!S.friends.pid || !profile(S.friends.pid)) S.friends.pid = S.selected;
+  const personal = S.profiles.filter((p) => p.kind !== 'room');
+  if (!S.friends.pid || !personal.some((p) => p.id === S.friends.pid)) S.friends.pid = S.selected;
   const pid = S.friends.pid;
   const n = renderSeq;
   const worlds = (await worldsOf(pid)).filter((w) => !w.damaged);
   if (S.view !== 'friends' || sessionOn() || stale(n)) return;
   const p = profile(pid);
-  const backend = !!S.settings.backend;
+  const backend = !!S.settings.invites;
   const preparing = S.busy?.kind === 'coop';
   const oldMc = p && !coopOk(p.minecraft);
   if (S.friends.folder && S.friends.folder !== '__new' && !worlds.some((w) => w.folder === S.friends.folder)) S.friends.folder = '';
   const folder = S.friends.folder || (worlds[0]?.folder ?? '__new');
   main.innerHTML = `<div class="page"><div class="page-head"><div class="grow"><h1>С друзьями</h1><p class="lead">Ты открываешь мир на своём компьютере — друзья заходят по ссылке-приглашению.</p></div></div>
   <div class="two-col"><section class="panel"><h2>Позвать друзей</h2>
-    <form id="host-form"><label class="field" for="h-build">Сборка</label><select class="input" id="h-build">${S.profiles.map((x) => `<option value="${esc(x.id)}" ${x.id === pid ? 'selected' : ''}>${esc(x.name)} — ${esc(buildLabel(x))}</option>`).join('')}</select>
+    <form id="host-form"><label class="field" for="h-build">Сборка</label><select class="input" id="h-build">${personal.map((x) => `<option value="${esc(x.id)}" ${x.id === pid ? 'selected' : ''}>${esc(x.name)} — ${esc(buildLabel(x))}</option>`).join('')}</select>
     <label class="field" for="h-world">Мир</label><select class="input" id="h-world">${worlds.map((w) => `<option value="${esc(w.folder)}" ${w.folder === folder ? 'selected' : ''}>${esc(w.name)}${w.lastPlayed ? ' · ' + esc(date(w.lastPlayed)) : ''}</option>`).join('')}<option value="__new" ${folder === '__new' ? 'selected' : ''}>Новый мир…</option></select>
     <div id="new-world-fields" ${folder === '__new' ? '' : 'hidden'}><label class="field" for="h-name">Название нового мира</label><input class="input" id="h-name" maxlength="60" value="Мир с друзьями"><details class="more"><summary>Дополнительно</summary><div class="form-grid"><div><label class="field" for="h-mode">Режим</label><select class="input" id="h-mode"><option value="survival">Выживание</option><option value="creative">Творчество</option><option value="adventure">Приключение</option></select></div><div><label class="field" for="h-diff">Сложность</label><select class="input" id="h-diff"><option value="normal">Нормальная</option><option value="easy">Лёгкая</option><option value="hard">Сложная</option><option value="peaceful">Мирная</option></select></div></div><label class="field" for="h-seed">Seed (необязательно)</label><input class="input" id="h-seed" maxlength="64"><label class="check"><input type="checkbox" id="h-hc"><span>Хардкор</span></label></details></div>
     ${oldMc ? `<div class="notice"><strong>Minecraft ${esc(p.minecraft)} не подходит для игры с друзьями</strong>Сервер с проверкой аккаунтов Microsoft есть у Mojang только с версии 1.7.2. В одиночку эта сборка запускается как обычно. Для игры с друзьями выбери сборку новее или создай новую.<div class="actions"><button type="button" class="btn btn-secondary btn-small" data-act="create-build">Новая сборка</button></div></div>` : ''}
     ${S.settings.eula ? '' : `<label class="check"><input type="checkbox" id="h-eula"><span>Я принимаю <a href="#" data-external="https://aka.ms/MinecraftEULA">Minecraft EULA</a> — без этого сервер Minecraft не запускается</span></label>`}
+    <label class="check"><input type="checkbox" id="h-offline"><span>Разрешить друзьям без Microsoft <small>Тестовый режим: вход только по приглашению, но офлайн-ник можно подделать. В этом режиме у всех игроков, включая тебя, другие ID — в уже созданном мире все появятся без вещей, на спавне. Лучше включать для нового мира.</small></span></label>
     ${S.auth.account ? '' : '<div class="notice"><strong>Нужен вход через Microsoft</strong>Сервер проверяет аккаунты всех игроков и пускает только приглашённых.<div class="actions"><button type="button" class="btn btn-secondary btn-small" data-act="login">Войти</button></div></div>'}
-    <div class="notice ${backend ? 'ok' : ''}">${backend ? 'Приглашение по ссылке: друзья подключатся напрямую или, если прямой путь закрыт роутером, через relay-сервер easyLauncher.' : '<strong>Сервер приглашений не настроен в этой сборке лаунчера</strong>Друзья смогут подключиться только из твоей локальной сети (дом, один Wi-Fi).'}</div>
+    <div class="notice ${backend ? 'ok' : ''}">${S.settings.invites === 'eos' ? 'Приглашение по ссылке через Epic Online Services: друзья подключатся напрямую, а если роутер не пускает — через ретрансляторы Epic. Свой сервер не нужен.' : backend ? 'Приглашение по ссылке: друзья подключатся напрямую или, если прямой путь закрыт роутером, через relay-сервер easyLauncher.' : '<strong>Приглашения через интернет в этой сборке не настроены</strong>Друзья смогут подключиться только из твоей локальной сети (дом, один Wi-Fi).'}</div>
     <div class="actions"><button class="btn btn-primary" type="submit" ${preparing || !S.auth.account || S.busy || oldMc ? 'disabled' : ''}>${icon('play')}Начать сессию</button>${preparing ? '<button type="button" class="btn btn-ghost" id="h-cancel">Отменить</button>' : ''}</div>
     ${preparing ? `<div class="launch-state" id="launch-state" style="background:var(--panel-2)">${progressHtml()}</div>` : ''}
     <p class="hint">Мир открывается сервером на этом компьютере: друзья могут играть, пока он включён и сессия идёт.${p?.loader !== 'vanilla' ? ' Друзьям не нужно собирать моды вручную — лаунчер поставит им ту же сборку.' : ''}</p></form></section>
@@ -1678,7 +2120,7 @@ async function renderFriends(main) {
     e.preventDefault();
     if (!S.settings.eula && !$('#h-eula').checked) return toast('Чтобы запустить сервер, отметь согласие с Minecraft EULA.');
     const f = $('#h-world').value;
-    startCoop({ profileId: pid, folder: f === '__new' ? null : f, create: f === '__new' ? { name: $('#h-name').value.trim() || 'Мир с друзьями', seed: $('#h-seed').value.trim(), gamemode: $('#h-mode').value, difficulty: $('#h-diff').value, hardcore: $('#h-hc').checked } : null, eula: S.settings.eula || $('#h-eula').checked });
+    startCoop({ profileId: pid, folder: f === '__new' ? null : f, create: f === '__new' ? { name: $('#h-name').value.trim() || 'Мир с друзьями', seed: $('#h-seed').value.trim(), gamemode: $('#h-mode').value, difficulty: $('#h-diff').value, hardcore: $('#h-hc').checked } : null, eula: S.settings.eula || $('#h-eula').checked, offlineGuests: $('#h-offline').checked });
   };
   $('#join-form').onsubmit = (e) => {
     e.preventDefault();
@@ -1718,38 +2160,94 @@ async function endCoop() {
   render();
 }
 
+/** Админ-панель сервера хозяина: обзор, игроки, настройки, приглашения, консоль. */
+const ADMIN_TABS = [
+  ['overview', 'Обзор'],
+  ['players', 'Игроки'],
+  ['settings', 'Настройки сервера'],
+  ['invites', 'Приглашения'],
+  ['console', 'Консоль'],
+];
+const GM = { survival: 'Выживание', creative: 'Творчество', adventure: 'Приключение', spectator: 'Наблюдение' };
+const DIFF = { peaceful: 'Мирная', easy: 'Лёгкая', normal: 'Нормальная', hard: 'Сложная' };
+const PROP_LABEL = { motd: 'Описание сервера', 'max-players': 'Максимум игроков', difficulty: 'Сложность', gamemode: 'Режим для новых игроков', pvp: 'PvP', 'allow-flight': 'Разрешить полёт', 'spawn-protection': 'Защита спавна', 'view-distance': 'Дальность прорисовки', 'simulation-distance': 'Дальность симуляции', 'enable-command-block': 'Командные блоки' };
+const RULE_LABEL = {
+  keepInventory: ['Сохранять инвентарь после смерти', ''],
+  doDaylightCycle: ['Смена дня и ночи', 'Выкл. — время стоит на месте'],
+  doWeatherCycle: ['Смена погоды', ''],
+  doMobSpawning: ['Появление мобов', ''],
+  mobGriefing: ['Мобы ломают блоки', 'Криперы, эндермены и др.'],
+  doFireTick: ['Огонь распространяется', ''],
+  naturalRegeneration: ['Восстановление здоровья', 'Сытость лечит игрока'],
+  doInsomnia: ['Фантомы', 'Появляются, если долго не спать'],
+  playersSleepingPercentage: ['Сколько игроков должно спать, %', 'Чтобы ночь пропустилась'],
+};
+const uptime = (t) => (t ? hours(Math.max(0, (Date.now() - t) / 1000)) : '—');
+const yesNo = (v) => (v ? 'Вкл.' : 'Выкл.');
+
 async function renderSession(main) {
   const st = S.status;
   const p = profile(st.serverProfile);
   const n = renderSeq;
-  const worlds = st.serverProfile ? await worldsOf(st.serverProfile) : [];
+  const [worlds, info] = await Promise.all([st.serverProfile ? worldsOf(st.serverProfile) : [], call('admin:info').catch(() => null)]);
   if (S.view !== 'friends' || stale(n)) return;
-  // перерисовка (друг вошёл, состояние сервера) не должна стирать ссылку и недописанную команду
-  const keepCmd = $('#console-in')?.value || '';
-  const keepFocus = document.activeElement?.id === 'console-in';
+  S.admin.info = info;
+  // перерисовка (друг вошёл, состояние сервера) не должна стирать недописанное: команду, сообщение, форму
+  const keep = {};
+  $$('#main [data-keep]').forEach((el) => (keep[el.id] = el.type === 'checkbox' ? el.checked : el.value));
+  const focused = document.activeElement?.id;
   const w = worlds.find((x) => x.folder === st.serverFolder);
   const ready = st.server === 'running';
   const addr = '127.0.0.1:' + st.port;
-  const guests = S.room?.guests || [];
-  const guestStatus = (g) => ({ pending: 'ждёт подтверждения', accepted: g.routes?.length ? 'подключён ' + g.routes.map((r) => ROUTES[r] || r).join(', ') : 'принят, подключается', left: 'вышел', rejected: 'не принят', revoked: 'приглашение отозвано' })[g.status] || g.status;
-  main.innerHTML = `<div class="page"><div class="page-head"><div class="grow"><h1>С друзьями</h1><p class="lead">Сессия: ${esc(w?.name || st.serverFolder || '')} · сборка «${esc(p?.name || '')}» (${esc(buildLabel(p))})</p></div><span class="tag ${ready ? 'green' : 'warn'}">${ready ? 'Сервер работает' : st.server === 'stopping' ? 'Сохраняем мир…' : 'Сервер запускается…'}</span></div>
-  <div class="two-col"><section class="panel"><h2>Игроки</h2>
-    <ul class="people">${st.players.length ? st.players.map((n) => `<li>${icon('avatar')}<span class="grow">${esc(n)}</span>${n === me() ? '<span class="tag">это ты</span>' : ''}</li>`).join('') : '<li><span class="grow">В мире пока никого нет</span></li>'}</ul>
-    <p class="hint">Список — по журналу сервера: кто вошёл и вышел.</p>
-    <div class="actions"><button class="btn btn-primary" id="s-play" ${!ready || S.status.client || S.busy ? 'disabled' : ''}>${icon('play')}${S.status.client ? 'Игра открыта' : 'Играть'}</button><button class="btn btn-secondary" id="s-end" ${st.server === 'stopping' ? 'disabled' : ''}>${icon('stop')}Сохранить мир и завершить</button></div>
-    ${S.busy?.kind === 'play' ? `<div class="launch-state" id="launch-state" style="background:var(--panel-2)">${progressHtml()}</div>` : ''}
-    <details class="more"><summary>Подробнее: адреса в локальной сети, консоль, журнал</summary><p class="hint">В той же сети друг может подключиться в Minecraft через «Сетевая игра → Прямое подключение», если ты добавишь его ник командой <code>whitelist add Ник</code>.</p>${st.addresses.map((a) => `<div class="addr"><div><code>${esc(a.address)}:${st.port}</code><small>${esc(a.name)}</small></div><button class="btn btn-ghost btn-small" data-copy="${esc(a.address + ':' + st.port)}">Копировать</button></div>`).join('') || '<p class="hint">Нет локальной сети.</p>'}<form class="toolbar" id="console" style="margin-top:10px"><input class="input" id="console-in" maxlength="200" placeholder="Команда сервера, например: op ${esc(me())}" style="flex:1"><button class="btn btn-secondary" type="submit">Отправить</button></form><button class="btn btn-ghost btn-small" data-log="server">Журнал сервера</button></details></section>
-  <section class="panel"><h2>Приглашения</h2>${
-    S.room
-      ? `<p class="hint">Ссылка — это ключ: делись ею только с друзьями. Её можно отозвать.</p><div class="actions"><button class="btn btn-primary" id="inv-new" ${ready ? '' : 'disabled'}>${icon('link')}Создать ссылку</button></div><details class="more"><summary>Срок и ограничения</summary><div class="form-grid"><div><label class="field" for="inv-ttl">Срок действия</label><select class="input" id="inv-ttl"><option value="60">1 час</option><option value="1440" selected>1 день</option><option value="10080">7 дней</option></select></div><div><label class="field" for="inv-uses">Сколько человек</label><input class="input" id="inv-uses" type="number" min="1" max="20" value="4"></div></div><label class="field" for="inv-names">Только для ников (через запятую)</label><input class="input" id="inv-names" placeholder="Friend1, Friend2"></details><div id="inv-out"></div><div id="inv-list"></div>
-        <h3 style="margin-top:18px;font-size:14.5px">Подключения</h3><ul class="people">${guests.length ? guests.map((g) => `<li><span class="grow"><b>${esc(g.name)}</b> — ${esc(guestStatus(g))}</span></li>`).join('') : '<li><span class="grow">Пока никто не подключался</span></li>'}</ul><p class="hint">Маршрут показывается по факту соединения. Прямой путь работает не во всех сетях — тогда используется relay.</p>`
-      : `<div class="notice ${S.settings.backend ? 'error' : ''}">${S.settings.backend ? `<strong>Комната не открылась</strong>${esc(S.roomError || 'Сервер easyLauncher недоступен.')}<div class="actions"><button class="btn btn-secondary btn-small" id="room-retry">Повторить</button></div>` : '<strong>Приглашения через интернет недоступны</strong>Сервер приглашений не настроен в этой сборке лаунчера. Друзья из твоей локальной сети могут подключиться по адресу из «Подробнее».'}</div>`
-  }</section></div></div>`;
+  const tab = S.admin.tab;
+  const props = info?.properties || {};
+  const pending = info?.restartNeeded || [];
+  main.innerHTML = `<div class="page"><div class="page-head"><div class="grow"><h1>Сервер «${esc((w?.name !== 'world' && w?.name) || st.serverFolder || '')}»</h1><p class="lead">Сборка «${esc(p?.name || '')}» (${esc(buildLabel(p))}) · работает на этом компьютере</p></div><span class="tag ${ready ? 'green' : 'warn'}">${ready ? 'Сервер работает' : st.server === 'stopping' ? 'Сохраняем мир…' : 'Сервер запускается…'}</span></div>
+  <div class="hcard admin-stats"><div class="stat-grid admin-grid">
+    <div><b>${st.players.length} из ${props['max-players'] || '—'}</b><small>игроков онлайн</small></div>
+    <div><b>${esc(uptime(info?.startedAt))}</b><small>работает</small></div>
+    <div><b>${info?.memoryMb ? mb(info.memoryMb * 1024 * 1024) : '—'}${info?.ramGb ? ' из ' + info.ramGb + ' ГБ' : ''}</b><small>память сервера</small></div>
+    <div><b>${esc(DIFF[props.difficulty] || '—')} · ${esc(GM[props.gamemode] || '—')}</b><small>сложность и режим</small></div>
+  </div>
+  <div class="actions" style="margin-top:12px"><button class="btn btn-primary" id="s-play" ${!ready || S.status.client || S.busy ? 'disabled' : ''}>${icon('play')}${S.status.client ? 'Игра открыта' : 'Играть'}</button><button class="btn btn-secondary" id="s-restart" ${!ready || S.admin.restarting ? 'disabled' : ''}>${icon('refresh')}${S.admin.restarting ? 'Перезапускаем…' : 'Перезапустить'}</button><button class="btn btn-secondary" id="s-end" ${st.server === 'stopping' ? 'disabled' : ''}>${icon('stop')}Сохранить мир и завершить</button></div>
+  ${S.busy?.kind === 'play' ? `<div class="launch-state" id="launch-state" style="background:var(--panel-2)">${progressHtml()}</div>` : ''}</div>
+  ${pending.length ? `<div class="notice" style="margin-top:12px"><strong>Нужен перезапуск</strong>Изменения вступят в силу после перезапуска сервера: ${pending.map((k) => esc(PROP_LABEL[k] || k)).join(', ')}. Друзья ненадолго отключатся и смогут зайти снова по той же ссылке.<div class="actions"><button class="btn btn-secondary btn-small" data-restart>Перезапустить сейчас</button></div></div>` : ''}
+  <div class="tabs" role="tablist" style="margin-top:16px">${ADMIN_TABS.map(([k, t]) => `<button role="tab" data-atab="${k}" aria-selected="${tab === k}">${t}</button>`).join('')}</div>
+  <div id="admin-body">${adminBody(tab, { st, info, ready })}</div></div>`;
   hydrate(main);
-  if (S.lastInvite) $('#inv-out') && ($('#inv-out').innerHTML = inviteHtml(S.lastInvite));
-  if (keepCmd) $('#console-in').value = keepCmd;
-  if (keepFocus) $('#console-in').focus();
+  for (const [id, v] of Object.entries(keep)) {
+    const el = document.getElementById(id);
+    if (el) el.type === 'checkbox' ? (el.checked = v) : (el.value = v);
+  }
+  if (focused && document.getElementById(focused)) document.getElementById(focused).focus();
+  $$('[data-atab]').forEach(
+    (b) =>
+      (b.onclick = () => {
+        S.admin.tab = b.dataset.atab;
+        render();
+      }),
+  );
   $('#s-play').onclick = () => play(st.serverProfile, null, addr);
+  const restart = () => {
+    dialog('Перезапустить сервер?', '<p>Мир сохранится, сервер запустится заново с новыми настройками. Друзья отключатся примерно на минуту и смогут зайти снова — ссылки-приглашения продолжат работать.</p><div class="actions"><button class="btn btn-primary" id="rs-go">Перезапустить</button><button class="btn btn-ghost" data-close>Отмена</button></div>');
+    $('#rs-go').onclick = async () => {
+      closeDialog();
+      S.admin.restarting = true;
+      render();
+      try {
+        await call('admin:restart');
+        toast('Сервер перезапущен');
+      } catch (e) {
+        errorDialog(e, 'Сервер не перезапустился');
+      } finally {
+        S.admin.restarting = false;
+        await refresh().catch(() => {});
+        render();
+      }
+    };
+  };
+  $('#s-restart').onclick = restart;
+  $$('[data-restart]').forEach((b) => (b.onclick = restart));
   $('#s-end').onclick = () => {
     dialog('Завершить сессию?', '<p>Сервер сохранит мир и остановится. Друзья отключатся, приглашения перестанут работать.</p><div class="actions"><button class="btn btn-primary" id="end-go">Сохранить и завершить</button><button class="btn btn-ghost" data-close>Отмена</button></div>');
     $('#end-go').onclick = () => {
@@ -1757,36 +2255,216 @@ async function renderSession(main) {
       endCoop();
     };
   };
-  $('#console').onsubmit = async (e) => {
-    e.preventDefault();
-    const v = $('#console-in').value.trim();
-    if (!v) return;
-    await call('server:command', v).then(() => toast('Команда отправлена'), (err) => toast(err.message));
-    $('#console-in').value = '';
+  wireAdmin(tab, { st, info, ready });
+}
+
+/** Содержимое вкладки панели. */
+function adminBody(tab, { st, info, ready }) {
+  if (!info || info.state === 'stopped') return '<p class="hint">Сервер ещё не готов.</p>';
+  const props = info.properties || {};
+  const playerRow = (pl) =>
+    `<li><span class="grow"><b>${esc(pl.name)}</b>${pl.name === me() ? ' <span class="tag">это ты</span>' : ''}${pl.op ? ' <span class="tag green">оператор</span>' : ''}</span>
+    <select class="input input-small" data-pmode="${esc(pl.name)}" aria-label="Режим игры ${esc(pl.name)}"><option value="">Режим…</option>${Object.entries(GM).map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select>
+    <button class="btn btn-ghost btn-small" data-pact="${pl.op ? 'deop' : 'op'}" data-name="${esc(pl.name)}">${pl.op ? 'Снять оператора' : 'Сделать оператором'}</button>
+    ${pl.name === me() ? '' : `<button class="btn btn-ghost btn-small" data-pact="kick" data-name="${esc(pl.name)}">Кикнуть</button><button class="btn btn-ghost btn-small" data-pact="ban" data-name="${esc(pl.name)}">Забанить</button>`}</li>`;
+  if (tab === 'overview') {
+    return `<div class="two-col"><section class="panel"><h2>Игроки онлайн</h2><ul class="people">${info.online.length ? info.online.map((pl) => `<li>${icon('avatar')}<span class="grow">${esc(pl.name)}${pl.name === me() ? ' <span class="tag">это ты</span>' : ''}${pl.op ? ' <span class="tag green">оператор</span>' : ''}</span></li>`).join('') : '<li><span class="grow">В мире пока никого нет</span></li>'}</ul><div class="actions"><button class="btn btn-secondary btn-small" data-atab-go="invites">${icon('link')}Позвать друзей</button><button class="btn btn-ghost btn-small" data-atab-go="players">Управлять игроками</button></div></section>
+    <section class="panel"><h2>Быстрые действия</h2><div class="actions"><button class="btn btn-secondary btn-small" data-wact="day" ${ready ? '' : 'disabled'}>Сделать день</button><button class="btn btn-secondary btn-small" data-wact="night" ${ready ? '' : 'disabled'}>Сделать ночь</button><button class="btn btn-secondary btn-small" data-wact="clear" ${ready ? '' : 'disabled'}>Ясная погода</button><button class="btn btn-secondary btn-small" data-wact="rain" ${ready ? '' : 'disabled'}>Дождь</button><button class="btn btn-secondary btn-small" data-wact="save" ${ready ? '' : 'disabled'}>Сохранить мир</button></div>
+    <form id="say-form" style="margin-top:14px"><label class="field" for="say-in">Сообщение всем игрокам</label><div class="row"><input class="input" id="say-in" data-keep maxlength="200" placeholder="Например: через 5 минут перезапуск" style="flex:1"><button class="btn btn-secondary btn-small" type="submit" ${ready ? '' : 'disabled'}>Отправить</button></div></form></section></div>`;
+  }
+  if (tab === 'players') {
+    return `<div class="two-col"><section class="panel"><h2>Онлайн</h2><ul class="people">${info.online.length ? info.online.map(playerRow).join('') : '<li><span class="grow">В мире пока никого нет</span></li>'}</ul><p class="hint">Оператор может пользоваться командами (/gamemode, /tp и др.). Кик — просто отключить; бан — больше не пускать.</p></section>
+    <section class="panel"><h2>Белый список</h2><p class="hint">Заходить на сервер могут только эти игроки. Друзья по приглашению попадают сюда сами.</p><ul class="people">${info.whitelist.length ? info.whitelist.map((n) => `<li><span class="grow">${esc(n)}</span>${n === me() ? '' : `<button class="btn btn-ghost btn-small" data-pact="whitelist-remove" data-name="${esc(n)}">Убрать</button>`}</li>`).join('') : '<li><span class="grow">Пусто</span></li>'}</ul>
+    <form id="wl-form"><div class="row"><input class="input" id="wl-in" data-keep maxlength="16" pattern="[A-Za-z0-9_]{3,16}" placeholder="Ник игрока" style="flex:1"><button class="btn btn-secondary btn-small" type="submit">Добавить</button></div></form>
+    <h2 style="margin-top:20px">Баны</h2><ul class="people">${info.bans.length ? info.bans.map((b) => `<li><span class="grow"><b>${esc(b.name)}</b>${b.reason ? `<small style="display:block;color:var(--muted)">${esc(b.reason)}</small>` : ''}</span><button class="btn btn-ghost btn-small" data-pact="pardon" data-name="${esc(b.name)}">Разбанить</button></li>`).join('') : '<li><span class="grow">Никто не забанен</span></li>'}</ul>
+    <h2 style="margin-top:20px">Операторы</h2><ul class="people">${info.ops.length ? info.ops.map((n) => `<li><span class="grow">${esc(n)}</span><button class="btn btn-ghost btn-small" data-pact="deop" data-name="${esc(n)}">Снять</button></li>`).join('') : '<li><span class="grow">Операторов нет</span></li>'}</ul></section></div>`;
+  }
+  if (tab === 'settings') {
+    const sel = (k, map) => `<select class="input" id="ap-${k}" data-keep>${Object.entries(map).map(([v, l]) => `<option value="${v}" ${props[k] === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+    const num = (k, min, max) => `<input class="input" id="ap-${k}" data-keep type="number" min="${min}" max="${max}" value="${props[k] ?? ''}">`;
+    const chk = (k) => `<label class="check" style="margin:0"><input type="checkbox" id="ap-${k}" data-keep ${props[k] ? 'checked' : ''}><span>${esc(PROP_LABEL[k])}</span></label>`;
+    return `<div class="two-col"><section class="panel"><h2>Сервер</h2><form id="props-form">
+      <label class="field" for="ap-motd">${PROP_LABEL.motd}</label><input class="input" id="ap-motd" data-keep maxlength="59" value="${esc(props.motd || '')}">
+      <div class="form-grid"><div><label class="field" for="ap-difficulty">${PROP_LABEL.difficulty}</label>${sel('difficulty', DIFF)}</div><div><label class="field" for="ap-gamemode">${PROP_LABEL.gamemode}</label>${sel('gamemode', GM)}</div>
+      <div><label class="field" for="ap-max-players">${PROP_LABEL['max-players']}</label>${num('max-players', 1, 100)}</div><div><label class="field" for="ap-spawn-protection">${PROP_LABEL['spawn-protection']} (блоков)</label>${num('spawn-protection', 0, 64)}</div>
+      <div><label class="field" for="ap-view-distance">${PROP_LABEL['view-distance']} (чанков)</label>${num('view-distance', 2, 32)}</div><div><label class="field" for="ap-simulation-distance">${PROP_LABEL['simulation-distance']} (чанков)</label>${num('simulation-distance', 2, 32)}</div></div>
+      <div class="row" style="margin-top:12px;gap:18px">${chk('pvp')}${chk('allow-flight')}${chk('enable-command-block')}</div>
+      <div class="actions"><button class="btn btn-primary" type="submit">Сохранить</button></div>
+      <p class="hint">Сложность и режим для новых игроков меняются сразу. Остальное — после перезапуска сервера (кнопка вверху).</p></form></section>
+      <section class="panel"><h2>Правила игры</h2><p class="hint">Меняются сразу, без перезапуска.</p><div id="rules-box"><p class="hint">Спрашиваем у сервера…</p></div></section></div>`;
+  }
+  if (tab === 'invites') {
+    const guests = S.room?.guests || [];
+    const guestStatus = (g) => ({ checking: 'смотрит приглашение и готовит сборку', pending: 'ждёт подтверждения', accepted: g.routes?.length ? 'подключён ' + g.routes.map((r) => ROUTES[r] || r).join(', ') : 'принят, подключается', left: 'вышел', rejected: 'не принят', revoked: 'приглашение отозвано' })[g.status] || g.status;
+    return `<section class="panel"><h2>Приглашения</h2>${
+      S.room
+        ? `<p class="hint">Ссылка — это ключ: делись ею только с друзьями. Её можно отозвать.</p><div class="actions"><button class="btn btn-primary" id="inv-new" ${ready ? '' : 'disabled'}>${icon('link')}Создать ссылку</button></div><details class="more"><summary>Срок и ограничения</summary><div class="form-grid"><div><label class="field" for="inv-ttl">Срок действия</label><select class="input" id="inv-ttl" data-keep><option value="60">1 час</option><option value="1440" selected>1 день</option><option value="10080">7 дней</option></select></div><div><label class="field" for="inv-uses">Сколько человек</label><input class="input" id="inv-uses" data-keep type="number" min="1" max="20" value="4"></div></div><label class="field" for="inv-names">Только для ников (через запятую)</label><input class="input" id="inv-names" data-keep placeholder="Friend1, Friend2"></details><div id="inv-out"></div><div id="inv-list"></div>
+        <h3 style="margin-top:18px;font-size:14.5px">Подключения</h3><ul class="people">${guests.length ? guests.map((g) => `<li><span class="grow"><b>${esc(g.name)}</b> — ${esc(guestStatus(g))}</span></li>`).join('') : '<li><span class="grow">Пока никто не подключался</span></li>'}</ul><p class="hint">Маршрут показывается по факту соединения. Прямой путь работает не во всех сетях — тогда используется ${S.settings.invites === 'eos' ? 'ретранслятор Epic' : 'relay'}.</p>`
+        : `<div class="notice ${S.settings.invites ? 'error' : ''}">${S.settings.invites ? `<strong>Приглашения не открылись</strong>${esc(S.roomError || (S.settings.invites === 'eos' ? 'Нет связи с Epic Online Services — проверь интернет.' : 'Сервер easyLauncher недоступен.'))}<div class="actions"><button class="btn btn-secondary btn-small" id="room-retry">Повторить</button></div>` : '<strong>Приглашения через интернет недоступны</strong>В этой сборке лаунчера они не настроены. Друзья из твоей локальной сети могут подключиться по адресу из вкладки «Консоль».'}</div>`
+    }</section>`;
+  }
+  // консоль
+  return `<section class="panel"><h2>Консоль сервера</h2><pre class="log-view" id="admin-log" style="max-height:340px">Загружаем журнал…</pre>
+    <form class="toolbar" id="console" style="margin-top:10px"><input class="input" id="console-in" data-keep maxlength="200" placeholder="Команда сервера, например: op ${esc(me())}" style="flex:1"><button class="btn btn-secondary" type="submit">Отправить</button></form>
+    <details class="more"><summary>Адреса в локальной сети</summary><p class="hint">В той же сети друг может подключиться в Minecraft через «Сетевая игра → Прямое подключение», если его ник есть в белом списке (вкладка «Игроки»).</p>${st.addresses.map((a) => `<div class="addr"><div><code>${esc(a.address)}:${st.port}</code><small>${esc(a.name)}</small></div><button class="btn btn-ghost btn-small" data-copy="${esc(a.address + ':' + st.port)}">Копировать</button></div>`).join('') || (st.lanClosed ? '<p class="hint">Сессия «без Microsoft» открыта только по приглашениям: сервер ники не проверяет, поэтому из локальной сети напрямую к нему не подключиться — иначе любой зашёл бы под чужим ником.</p>' : '<p class="hint">Нет локальной сети.</p>')}</details></section>`;
+}
+
+/** Обработчики вкладки панели. */
+function wireAdmin(tab, { info }) {
+  clearInterval(S.admin.logTimer);
+  const after = async (msg) => {
+    toast(msg);
+    // сервер обновляет свои файлы списков не мгновенно
+    setTimeout(() => S.view === 'friends' && render(), 600);
   };
-  if ($('#room-retry'))
-    $('#room-retry').onclick = async () => {
-      try {
-        S.room = await call('room:open');
-        S.roomError = null;
-      } catch (e) {
-        S.roomError = e.message;
-      }
-      render();
+  $$('[data-atab-go]').forEach(
+    (b) =>
+      (b.onclick = () => {
+        S.admin.tab = b.dataset.atabGo;
+        render();
+      }),
+  );
+  $$('[data-wact]').forEach((b) => (b.onclick = () => call('admin:world', b.dataset.wact).then(() => toast({ day: 'Наступил день', night: 'Наступила ночь', clear: 'Погода ясная', rain: 'Пошёл дождь', save: 'Мир сохранён' }[b.dataset.wact]), (e) => toast(e.message))));
+  if ($('#say-form'))
+    $('#say-form').onsubmit = (e) => {
+      e.preventDefault();
+      call('admin:world', 'say', $('#say-in').value).then(() => (($('#say-in').value = ''), toast('Сообщение отправлено')), (err) => toast(err.message));
     };
-  if ($('#inv-new'))
-    $('#inv-new').onclick = async () => {
+  $$('[data-pact]').forEach(
+    (b) =>
+      (b.onclick = () => {
+        const { pact: action, name } = b.dataset;
+        const go = (extra = {}) => call('admin:player', action, name, extra).then(() => after({ kick: `${name} отключён`, ban: `${name} забанен`, pardon: `${name} разбанен`, op: `${name} теперь оператор`, deop: `${name} больше не оператор`, 'whitelist-remove': `${name} убран из белого списка` }[action] || 'Готово'), (e) => toast(e.message));
+        if (action !== 'ban' && action !== 'kick') return go();
+        dialog(action === 'ban' ? `Забанить ${name}?` : `Кикнуть ${name}?`, `<p>${action === 'ban' ? 'Игрок больше не сможет зайти на этот сервер, пока ты его не разбанишь.' : 'Игрок отключится, но сможет зайти снова.'}</p><label class="field" for="pa-reason">Причина (увидит игрок)</label><input class="input" id="pa-reason" maxlength="100"><div class="actions"><button class="btn btn-danger" id="pa-go">${action === 'ban' ? 'Забанить' : 'Кикнуть'}</button><button class="btn btn-ghost" data-close>Отмена</button></div>`);
+        $('#pa-go').onclick = () => {
+          const reason = $('#pa-reason').value;
+          closeDialog();
+          go({ reason });
+        };
+      }),
+  );
+  $$('[data-pmode]').forEach(
+    (s) =>
+      (s.onchange = () => {
+        if (!s.value) return;
+        call('admin:player', 'gamemode', s.dataset.pmode, { mode: s.value }).then(() => toast(`${s.dataset.pmode}: ${GM[s.value]}`), (e) => toast(e.message));
+        s.value = '';
+      }),
+  );
+  if ($('#wl-form'))
+    $('#wl-form').onsubmit = (e) => {
+      e.preventDefault();
+      const name = $('#wl-in').value.trim();
+      call('admin:player', 'whitelist-add', name).then(() => (($('#wl-in').value = ''), after(`${name} добавлен в белый список`)), (err) => toast(err.message));
+    };
+  if ($('#props-form')) {
+    $('#props-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const v = (k) => $('#ap-' + k);
+      const patch = { motd: v('motd').value, difficulty: v('difficulty').value, gamemode: v('gamemode').value, 'max-players': Number(v('max-players').value), 'spawn-protection': Number(v('spawn-protection').value), 'view-distance': Number(v('view-distance').value), pvp: v('pvp').checked, 'allow-flight': v('allow-flight').checked, 'enable-command-block': v('enable-command-block').checked };
+      if (!(Number(v('simulation-distance').value) > 0) && !info?.properties?.['simulation-distance']) delete patch['simulation-distance'];
+      else patch['simulation-distance'] = Number(v('simulation-distance').value);
       try {
-        const names = $('#inv-names').value.split(',').map((s) => s.trim()).filter(Boolean);
-        const inv = await call('room:invite', { ttlMinutes: Number($('#inv-ttl').value), maxUses: Number($('#inv-uses').value), allowedNames: names });
-        S.lastInvite = inv;
-        $('#inv-out').innerHTML = inviteHtml(inv);
-        listInvites();
-      } catch (e) {
-        $('#inv-out').innerHTML = `<div class="notice error">${esc(e.message)}</div>`;
+        const r = await call('admin:props', patch);
+        toast(r.restartNeeded.length ? 'Сохранено. Часть настроек — после перезапуска.' : 'Сохранено');
+        render();
+      } catch (err) {
+        toast(err.message);
       }
     };
-  if (S.room) listInvites();
+    paintRules();
+  }
+  if (tab === 'invites') {
+    if (S.lastInvite) $('#inv-out') && ($('#inv-out').innerHTML = inviteHtml(S.lastInvite));
+    if ($('#room-retry'))
+      $('#room-retry').onclick = async () => {
+        try {
+          S.room = await call('room:open');
+          S.roomError = null;
+        } catch (e) {
+          S.roomError = e.message;
+        }
+        render();
+      };
+    if ($('#inv-new'))
+      $('#inv-new').onclick = async () => {
+        try {
+          const names = $('#inv-names').value.split(',').map((s) => s.trim()).filter(Boolean);
+          const inv = await call('room:invite', { ttlMinutes: Number($('#inv-ttl').value), maxUses: Number($('#inv-uses').value), allowedNames: names });
+          S.lastInvite = inv;
+          $('#inv-out').innerHTML = inviteHtml(inv);
+          listInvites();
+        } catch (e) {
+          $('#inv-out').innerHTML = `<div class="notice error">${esc(e.message)}</div>`;
+        }
+      };
+    if (S.room) listInvites();
+  }
+  if (tab === 'console') {
+    $('#console').onsubmit = async (e) => {
+      e.preventDefault();
+      const v = $('#console-in').value.trim();
+      if (!v) return;
+      await call('server:command', v).then(() => toast('Команда отправлена'), (err) => toast(err.message));
+      $('#console-in').value = '';
+      setTimeout(paintLog, 400);
+    };
+    // журнал сервера обновляется, пока открыта вкладка
+    const paintLog = async () => {
+      const el = $('#admin-log');
+      if (!el) return clearInterval(S.admin.logTimer);
+      const text = await call('server:log').catch(() => '');
+      const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+      el.textContent = text || 'Пока пусто.';
+      if (atBottom) el.scrollTop = el.scrollHeight;
+    };
+    paintLog();
+    S.admin.logTimer = setInterval(paintLog, 2000);
+  }
+}
+
+/** Правила игры: сервер отвечает на каждое в свой журнал — показываем, что он сказал. */
+async function paintRules() {
+  const box = $('#rules-box');
+  let rules;
+  try {
+    // каждое правило — команда серверу: при перерисовке (кто-то вошёл) не спрашиваем заново
+    if (!S.admin.rules || Date.now() - S.admin.rulesAt > 60000) {
+      S.admin.rules = await call('admin:rules');
+      S.admin.rulesAt = Date.now();
+    }
+    rules = S.admin.rules;
+  } catch (e) {
+    if (box) box.innerHTML = `<p class="hint">${esc(e.message)}</p>`;
+    return;
+  }
+  if (!$('#rules-box')) return;
+  const keys = Object.keys(RULE_LABEL).filter((k) => k in rules);
+  $('#rules-box').innerHTML = keys.length
+    ? keys
+        .map((k) => {
+          const [title, hint] = RULE_LABEL[k];
+          const ctl = typeof rules[k] === 'boolean' ? `<button class="switch" role="switch" aria-checked="${rules[k]}" aria-label="${esc(title)}" data-rule="${k}"></button>` : `<input class="input" type="number" min="0" max="100" value="${rules[k]}" data-rule-num="${k}" style="max-width:90px">`;
+          return `<div class="option-row"><span>${esc(title)}${hint ? `<small>${esc(hint)}</small>` : ''}</span>${ctl}</div>`;
+        })
+        .join('')
+    : '<p class="hint">Эта версия Minecraft не сообщила правила игры.</p>';
+  $$('[data-rule]').forEach(
+    (b) =>
+      (b.onclick = async () => {
+        const on = b.getAttribute('aria-checked') !== 'true';
+        try {
+          await call('admin:rule', b.dataset.rule, on);
+          b.setAttribute('aria-checked', String(on));
+          S.admin.rules[b.dataset.rule] = on;
+          toast(`${RULE_LABEL[b.dataset.rule][0]}: ${yesNo(on)}`);
+        } catch (e) {
+          toast(e.message);
+        }
+      }),
+  );
+  $$('[data-rule-num]').forEach((i) => (i.onchange = () => call('admin:rule', i.dataset.ruleNum, Number(i.value)).then(() => toast('Сохранено'), (e) => toast(e.message))));
 }
 
 const inviteHtml = (inv) => `<div class="addr"><div><code>${esc(inv.link)}</code><small>до ${new Date(inv.expiresAt).toLocaleString('ru-RU')} · до ${inv.maxUses} чел.</small></div><button class="btn btn-secondary btn-small" data-copy="${esc(inv.link)}">Копировать</button></div>`;
@@ -1813,7 +2491,6 @@ async function guestCheck(link) {
   const out = $('#guest-flow');
   if (out) out.innerHTML = '<p class="hint">Проверяем приглашение…</p>';
   try {
-    if (!S.auth.account) throw Object.assign(new Error('Для подключения к другу нужен вход через Microsoft: сервер друга проверяет аккаунты.'), { code: 'AUTH_REQUIRED' });
     const info = await call('guest:open', link);
     S.guest = { info, stage: null };
   } catch (e) {
@@ -1841,7 +2518,7 @@ function paintGuest() {
     return;
   }
   const total = info.required.reduce((a, m) => a + (m.size || 0), 0);
-  out.innerHTML = `<div class="panel" style="background:var(--panel-2);margin-top:14px"><b>${esc(info.room.name)}</b><p class="hint" style="margin-top:2px">Хозяин ${esc(info.room.hostName)} · ${esc(LOADERS[info.loader])} ${esc(info.minecraft)}</p>${info.loader === 'vanilla' ? '<p style="margin-top:8px">Моды не нужны.</p>' : `<p style="margin-top:8px">Нужные моды: ${info.required.length} (${mb(total)})</p><ul class="plan-steps">${info.required.map((m) => `<li>${icon('mods')}<span>${esc(m.name)} <small>${esc(m.version)}${m.manual ? ' · файл вручную' : ''}</small></span></li>`).join('')}</ul>`}${info.optional.length ? `<details class="more"><summary>Необязательные моды хозяина (${info.optional.length})</summary>${info.optional.map((m) => `<label class="check"><input type="checkbox" data-opt="${esc(m.key)}"><span>${esc(m.name)} ${esc(m.version)}</span></label>`).join('')}</details>` : ''}<p class="hint">Сборка друга ставится отдельно — твои сборки не меняются. Файлы скачиваются с Modrinth/CurseForge с проверкой хешей, а не с компьютера хозяина.</p><div class="actions"><button class="btn btn-primary" id="g-go">Подготовить и присоединиться</button></div><p class="hint" id="guest-stage"></p></div>`;
+  out.innerHTML = `<div class="panel" style="background:var(--panel-2);margin-top:14px"><b>${esc(info.room.name)}</b><p class="hint" style="margin-top:2px">Хозяин ${esc(info.room.hostName)} · ${esc(LOADERS[info.loader])} ${esc(info.minecraft)}</p>${!S.auth.account && info.offlineGuests ? `<div class="notice ok"><strong>Хозяин разрешил вход без Microsoft</strong>Ты войдёшь под ником ${esc(info.playerName)}. Соединение всё равно защищено приглашением и допуском хозяина.</div>` : ''}${info.loader === 'vanilla' ? '<p style="margin-top:8px">Моды не нужны.</p>' : `<p style="margin-top:8px">Нужные моды: ${info.required.length} (${mb(total)})</p><ul class="plan-steps">${info.required.map((m) => `<li>${icon('mods')}<span>${esc(m.name)} <small>${esc(m.version)}${m.manual ? ' · файл вручную' : ''}</small></span></li>`).join('')}</ul>`}${info.optional.length ? `<details class="more"><summary>Необязательные моды хозяина (${info.optional.length})</summary>${info.optional.map((m) => `<label class="check"><input type="checkbox" data-opt="${esc(m.key)}"><span>${esc(m.name)} ${esc(m.version)}</span></label>`).join('')}</details>` : ''}<p class="hint">Сборка друга ставится отдельно — твои сборки не меняются. Файлы скачиваются с Modrinth/CurseForge с проверкой хешей, а не с компьютера хозяина.</p><div class="actions"><button class="btn btn-primary" id="g-go">Подготовить и присоединиться</button></div><p class="hint" id="guest-stage"></p></div>`;
   hydrate(out);
   $('#g-go').onclick = guestJoin;
 }
@@ -1851,6 +2528,7 @@ async function guestJoin() {
   try {
     line('Сверяем сборку…');
     await call('guest:prepare', $$('[data-opt]').filter((c) => c.checked).map((c) => c.dataset.opt));
+    await refresh();
     line('Подготовка и подключение…');
     S.busy = { kind: 'guest' };
     paintChrome();
@@ -1873,6 +2551,10 @@ async function guestJoin() {
 const ACCENTS = [['Лес', '#b9d38e'], ['Мята', '#7ee0c3'], ['Небо', '#8ec5ff'], ['Аметист', '#c4a5ff'], ['Розовый', '#ff9ecf'], ['Редстоун', '#ff7b72'], ['Закат', '#ffb27a'], ['Золото', '#f2d06b']];
 /** Готовые темы: стиль оформления + подходящий цвет акцента (его можно поменять ниже). */
 const STYLES = [
+  ['lush', 'Пышная пещера', 'Мох, лианы и светящиеся ягоды', '#f2b25c'],
+  ['campfire', 'Ночь у костра', 'Угли, искры и тёплый свет', '#ff8a3d'],
+  ['deepdark', 'Древний город', 'Скалк, бирюза и тихий отклик', '#3fd6c6'],
+  ['meadow', 'Дневной луг', 'Светлая: облака, цветы, смена дня', '#4f9a3a'],
   ['glass', 'Жидкое стекло', 'Живой цветной фон, стеклянные панели', '#8ec5ff'],
   ['aurora', 'Аврора', 'Северное сияние и звёзды', '#7ee0c3'],
   ['neon', 'Неон', 'Светящиеся рамки и ретро-сетка', '#ff4fd8'],
@@ -1889,6 +2571,14 @@ const APPEAR_OPTS = [
   ['font', 'Шрифт', '', [['system', 'Обычный'], ['rounded', 'Округлый'], ['minecraft', 'Пиксельный']]],
   ['sidebar', 'Боковая панель', '', [['full', 'С подписями'], ['compact', 'Только значки']]],
 ];
+/** Настройка, которую выбранная тема задаёт сама (null — настраивается). */
+function lockedOption(key, style) {
+  if (key === 'blur' && style === 'pixel') return 'В теме «Пиксель» нет стеклянных панелей — у неё каменные блоки';
+  if (key === 'blur' && style === 'minimal') return 'В теме «Минимализм» нет стекла — панели однотонные';
+  if (key === 'radius' && style === 'pixel') return 'В теме «Пиксель» углы всегда прямые — это часть её вида';
+  if (key === 'font' && style === 'pixel') return 'В теме «Пиксель» шрифт всегда моноширинный, как в игре';
+  return null;
+}
 async function setAppearance(patch) {
   S.settings = await call('settings:set', { appearance: patch });
   applyAppearance(S.settings.appearance);
@@ -1907,18 +2597,23 @@ async function renderSettings(main) {
   <section class="panel"><h2>Аккаунт</h2>${
     acc
       ? `<p style="margin-top:8px"><b>${esc(acc.name)}</b> · аккаунт Microsoft</p><div class="actions"><button class="btn btn-secondary btn-small" id="logout">Выйти</button></div>`
-      : `<p class="hint">Вход нужен для игры с лицензией Minecraft и для игры с друзьями.</p><div class="actions"><button class="btn btn-primary btn-small" data-act="login">${icon('lock')}Войти через Microsoft</button></div><form id="nick-form"><label class="field" for="nick">Ник для игры без входа</label><div class="row"><input class="input" id="nick" maxlength="16" pattern="[A-Za-z0-9_]{3,16}" required value="${esc(s.nickname)}" style="max-width:240px"><button class="btn btn-secondary btn-small" type="submit">Сохранить</button></div></form>`
-  }</section>
+      : `<p class="hint">Вход нужен для лицензии и обычных серверов. Без него можно зайти к другу, если хозяин включил тестовый режим.</p><div class="actions"><button class="btn btn-primary btn-small" data-act="login">${icon('lock')}Войти через Microsoft</button></div><form id="nick-form"><label class="field" for="nick">Ник для игры без входа</label><div class="row"><input class="input" id="nick" maxlength="16" pattern="[A-Za-z0-9_]{3,16}" required value="${esc(s.nickname)}" style="max-width:240px"><button class="btn btn-secondary btn-small" type="submit">Сохранить</button></div></form>`
+  }${S.auth.secure === false ? '<div class="notice warn" style="margin-top:10px">Защищённое хранилище ОС недоступно: вход действует только до закрытия лаунчера.</div>' : ''}</section>
   <section class="panel" id="appearance"><h2>Внешний вид</h2>
     <p class="hint">Тема — общий стиль оформления. Ниже можно подстроить цвет, схему и эффекты.</p>
     <div class="theme-gallery">${STYLES.map(([k, t, d]) => `<button class="theme-card" data-style="${k}" aria-pressed="${ap.style === k}"><div class="pv pv-${k}"></div><b>${t}</b><small>${d}</small></button>`).join('')}</div>
     <div class="option-row" style="margin-top:8px"><span>Цвет акцента<small>Кнопки, выделение, индикаторы</small></span></div>
     <div class="swatches">${ACCENTS.map(([n, c]) => `<button class="swatch" style="background:${c}" data-accent="${c}" aria-pressed="${ap.accent === c}" title="${n}" aria-label="${n}"></button>`).join('')}<label class="swatch swatch-custom" title="Свой цвет" aria-pressed="${!ACCENTS.some(([, c]) => c === ap.accent)}"><input type="color" id="accent-custom" value="${ap.accent}" aria-label="Свой цвет"></label></div>
-    ${APPEAR_OPTS.map(([key, title, hint, opts]) => `<div class="option-row"><span>${title}${hint ? `<small>${hint}</small>` : ''}</span><div class="segmented" role="group" aria-label="${title}">${opts.map(([v, l]) => `<button data-ap="${key}" data-val="${v}" aria-pressed="${String(ap[key]) === String(v)}">${l}</button>`).join('')}</div></div>`).join('')}
+    ${APPEAR_OPTS.map(([key, title, hint, opts]) => {
+      // что тема задаёт сама: кнопки неактивны и подписано почему, а не «молча не работают»
+      const locked = lockedOption(key, ap.style);
+      return `<div class="option-row ${locked ? 'locked' : ''}"><span>${title}${locked || hint ? `<small>${locked || hint}</small>` : ''}</span><div class="segmented" role="group" aria-label="${title}">${opts.map(([v, l]) => `<button data-ap="${key}" data-val="${v}" aria-pressed="${String(ap[key]) === String(v)}" ${locked ? 'disabled' : ''}>${l}</button>`).join('')}</div></div>`;
+    }).join('')}
     <div class="actions"><button class="btn btn-ghost btn-small" id="ap-reset">${icon('refresh')}Вернуть стандартный вид</button></div></section>
   <section class="panel"><h2>Фон главного экрана</h2><div class="segmented" role="group" style="margin-top:10px"><button data-bg="default" aria-pressed="${bgMode === 'default'}">Стандартный</button><button data-bg="custom" aria-pressed="${bgMode === 'custom'}">Своя картинка</button><button data-bg="profile" aria-pressed="${bgMode === 'profile'}">Обложка или скриншот сборки</button></div>
     <p class="hint">${bgMode === 'profile' ? 'Обложка выбранной сборки, а если её нет — последний скриншот из этой сборки. Без скриншотов — стандартный фон.' : bgMode === 'custom' ? 'Картинка копируется в папку лаунчера.' : 'Нейтральный фон. Лаунчер не подставляет случайные картинки.'}</p>
-    ${bgMode === 'custom' ? '<div class="actions"><button class="btn btn-secondary btn-small" id="bg-pick">Выбрать другую картинку</button></div>' : ''}</section>
+    ${bgMode === 'custom' ? '<div class="actions"><button class="btn btn-secondary btn-small" id="bg-pick">Выбрать другую картинку</button></div>' : ''}
+    <div class="option-row" style="margin-top:6px"><span>Живой фон<small>${S.memories?.supported === false ? 'Запись роликов есть только в Windows. На фоне — панорама темы.' : `Ролики из твоей игры («Камера воспоминаний»: ${s.memories?.record ? 'запись включена' : 'запись выключена'}${S.memClips.length ? `, ${S.memClips.length} ${plural(S.memClips.length, 'ролик', 'ролика', 'роликов')}` : ''}), а без них — панорама живой темы. Видно при стандартном фоне.`}</small></span><button class="btn btn-secondary btn-small" id="st-memories">${icon('camera')}Камера воспоминаний</button></div></section>
   <section class="panel"><h2>Память по умолчанию</h2><div class="form-grid"><div><label class="field" for="st-ram">Для игры</label>${ramField('st-ram', s.ram, { max: Math.max(2, (S.sys.totalRamGiB || 8) - 2), presets: [2, 4, 6, 8, 12] })}</div><div><label class="field" for="st-sram">Для сервера (с друзьями)</label>${ramField('st-sram', s.serverRam, { max: Math.max(1, (S.sys.totalRamGiB || 8) - 4), presets: [2, 3, 4, 6] })}</div></div><p class="hint">ОЗУ компьютера: ${S.sys.totalRamGiB || '?'} ГБ. Обычно хватает 4–6 ГБ; большим сборкам — 8–12. Слишком много памяти не ускоряет игру. У сборки может быть своё значение.</p></section>
 </div>
   <div>${gameSettingsHtml(s)}
@@ -1928,12 +2623,21 @@ async function renderSettings(main) {
   <section class="panel"><h2>Хранилище</h2><p class="hint" id="st-storage">Считаем место…</p><div class="actions"><button class="btn btn-secondary btn-small" id="st-clean">${icon('trash')}Очистить неиспользуемые моды</button><button class="btn btn-ghost btn-small" id="root">${icon('folder')}Папка easyLauncher</button></div><p class="hint">Очистка удаляет из общего кэша файлы модов, которых нет ни в одной сборке и ни в одном прежнем составе (для отката). Миры и сборки не трогаются.</p></section>
   <section class="panel"><h2>О программе</h2><p class="hint">easyLauncher ${esc(S.sys.version || '')} · не связан с Mojang и Microsoft. Minecraft EULA: ${s.eula ? 'принята' : 'ещё не принята (спросим при первом запуске сервера)'}.</p><div class="actions"><button class="btn btn-ghost btn-small" id="st-logs">${icon('folder')}Журнал лаунчера</button></div><p class="hint">Если что-то не работает — пришли файл launcher.log из этой папки: в нём записаны ошибки.</p></section></div></div></div>`;
   hydrate(main);
-  $$('.theme-card[data-style]').forEach((b) => (b.onclick = () => setAppearance({ style: b.dataset.style, accent: STYLES.find((x) => x[0] === b.dataset.style)[3], ...(b.dataset.style === 'pixel' ? { radius: 'sharp', font: 'minecraft' } : { radius: 'normal', font: 'system' }) })));
+  $$('.theme-card[data-style]').forEach(
+    (b) =>
+      (b.onclick = () => {
+        const st = b.dataset.style;
+        // у живых тем своё настроение: луг светлый, пещеры и костёр — тёмные
+        const scheme = st === 'meadow' ? { theme: 'light' } : ['lush', 'campfire', 'deepdark'].includes(st) ? { theme: 'dark' } : {};
+        setAppearance({ style: st, accent: STYLES.find((x) => x[0] === st)[3], ...scheme, ...(st === 'pixel' ? { radius: 'sharp', font: 'minecraft' } : { radius: 'normal', font: 'system' }) });
+      }),
+  );
   $$('[data-accent]').forEach((b) => (b.onclick = () => setAppearance({ accent: b.dataset.accent })));
   $('#accent-custom').oninput = (e) => applyAppearance({ ...S.settings.appearance, accent: e.target.value });
   $('#accent-custom').onchange = (e) => setAppearance({ accent: e.target.value });
   $$('[data-ap]').forEach((b) => (b.onclick = () => setAppearance({ [b.dataset.ap]: b.dataset.ap === 'scale' ? Number(b.dataset.val) : b.dataset.val })));
-  $('#ap-reset').onclick = () => setAppearance({ style: 'glass', blur: 'normal', theme: 'dark', motion: 'full', radius: 'normal', sidebar: 'full', font: 'system', accent: '#8ec5ff', scale: 100 });
+  $('#ap-reset').onclick = () => setAppearance({ style: 'lush', blur: 'normal', theme: 'dark', motion: 'full', radius: 'normal', sidebar: 'full', font: 'system', accent: '#f2b25c', scale: 100 });
+  $('#st-memories').onclick = memoriesDialog;
   if ($('#logout'))
     $('#logout').onclick = async () => {
       S.auth = await call('auth:logout');
@@ -2002,13 +2706,14 @@ function launcherSettingsHtml(s) {
   return `<section class="panel"><h2>Лаунчер</h2>
     <div class="option-row"><span>Когда игра запущена<small>Что делать с окном лаунчера</small></span>${segm('afterLaunch', s.afterLaunch, [['keep', 'Оставить'], ['minimize', 'Свернуть'], ['hide', 'Спрятать до выхода']])}</div>
     <div class="option-row"><span>Новости Minecraft на главной</span>${segm('showNews', s.showNews, [[true, 'Показывать'], [false, 'Скрыть']])}</div>
-    <div class="option-row"><span>Проверять обновления модов<small>На главной — сколько модов сборки можно обновить</small></span>${segm('checkUpdates', s.checkUpdates, [[true, 'Да'], [false, 'Нет']])}</div></section>`;
+    <div class="option-row"><span>Проверять обновления модов<small>На главной — сколько модов сборки можно обновить</small></span>${segm('checkUpdates', s.checkUpdates, [[true, 'Да'], [false, 'Нет']])}</div>
+    <div class="option-row"><span>Проверять игру после обновления модов<small>Лаунчер ненадолго запустит игру; если она вылетит — сам вернёт прежние версии модов</small></span>${segm('verifyUpdates', s.verifyUpdates, [[true, 'Да'], [false, 'Нет']])}</div></section>`;
 }
 
 function javaSettingsHtml(s) {
   return `<section class="panel"><h2>Java</h2><p class="hint">Обычно ничего менять не нужно: лаунчер сам скачивает подходящую Java от Mojang для каждой версии игры.</p>
     <details class="more" ${s.javaPath || s.jvmArgs ? 'open' : ''}><summary>Для опытных игроков</summary>
-    <label class="field">Своя Java</label><div class="row"><span class="hint" style="margin:0;flex:1;word-break:break-all">${s.javaPath ? esc(s.javaPath) : 'Автоматически (рекомендуется)'}</span><button class="btn btn-secondary btn-small" id="st-java">Выбрать файл…</button>${s.javaPath ? '<button class="btn btn-ghost btn-small" id="st-java-auto">Автоматически</button>' : ''}</div><p class="hint">Версия Java должна подходить игре: 1.20.5+ — Java 21, 1.17–1.20.4 — Java 17, старее — Java 8.</p>
+    <label class="field">Своя Java</label><div class="row"><span class="hint" style="margin:0;flex:1;word-break:break-all">${s.javaPath ? esc(s.javaPath) : 'Автоматически (рекомендуется)'}</span><button class="btn btn-secondary btn-small" id="st-java">Выбрать файл…</button>${s.javaPath ? '<button class="btn btn-ghost btn-small" id="st-java-auto">Автоматически</button>' : ''}</div><p class="hint">Версия Java должна подходить игре: 1.20.5+ — Java 21, 1.18–1.20.4 — Java 17, 1.17 — Java 16, старее — Java 8.</p>
     <label class="field" for="st-jvm">Аргументы Java</label><div class="row"><input class="input" id="st-jvm" value="${esc(s.jvmArgs)}" placeholder="например -XX:+UseZGC" style="flex:1"><button class="btn btn-secondary btn-small" id="st-jvm-save">Сохранить</button></div><p class="hint">Добавляются к стандартным. Память задаётся выше, не через -Xmx.</p></details></section>`;
 }
 
@@ -2147,7 +2852,7 @@ function loginDialog() {
   if (S.auth.account) return go('settings');
   loginGate(() => render());
 }
-$('#account-chip').onclick = () => (S.auth.account ? go('settings') : loginDialog());
+$('#account-chip').onclick = () => go('wardrobe');
 
 // ---------- журналы ----------
 async function logDialog(source) {
@@ -2207,14 +2912,19 @@ async function ask(text, answers = null, summary = '') {
   const p = sel();
   if (!p) return toast('Сначала создай сборку.');
   S.assistant.feed.push({ user: true, text: answers ? summary : text });
-  pushAnswer(`<p class="hint"><span class="spinner"></span>${answers ? 'Подбираю моды и проверяю совместимость… Обычно до минуты, у большой сборки — дольше.' : 'Думаю…'}</p>`);
-  const pending = S.assistant.feed.length - 1;
+  const pending = { html: `<p class="hint"><span class="spinner"></span>${answers ? 'Подбираю моды и проверяю совместимость… Обычно до минуты, у большой сборки — дольше.' : 'Думаю…'}</p>` };
+  S.assistant.feed.push(pending);
+  paintFeed();
+  const removePending = () => {
+    const i = S.assistant.feed.indexOf(pending);
+    if (i >= 0) S.assistant.feed.splice(i, 1);
+  };
   try {
     const r = await call('ai:ask', text, p.id, answers);
-    S.assistant.feed.splice(pending, 1);
+    removePending();
     renderAnswer(r, p);
   } catch (e) {
-    S.assistant.feed.splice(pending, 1);
+    removePending();
     pushAnswer(`<div class="notice error">${esc(e.message)}</div>`);
   }
 }
@@ -2268,7 +2978,7 @@ function wireTask(el, r, label, done) {
   };
 }
 const taskBox = (label, extra = '') => `<div data-task><div class="actions"><button class="btn btn-primary btn-small" data-a="run">${esc(label)}</button>${extra}</div><div data-progress></div></div>`;
-const linksText = (res) => `${res.linksAdded?.length ? ` Проверил файлы модов и добавил нужное, о чём каталог не знал: ${res.linksAdded.join(', ')}.` : ''}${res.linksRemoved?.length ? ` Убрал моды, которым не нашлось обязательной библиотеки: ${res.linksRemoved.join(', ')}.` : ''}`;
+const linksText = (res) => `${res.linksAdded?.length ? ` Проверил файлы модов и добавил нужное, о чём каталог не знал: ${res.linksAdded.join(', ')}.` : ''}${res.linksChanged?.length ? ` Подобрал версии, которые работают вместе: ${res.linksChanged.join('; ')}.` : ''}${res.linksRemoved?.length ? ` Убрал моды, которым не нашлось обязательной библиотеки: ${res.linksRemoved.join(', ')}.` : ''}`;
 const doneText = (res) => (res.created ? 'Готово! Сборка создана и выбрана — жми «Играть». Первый запуск скачает игру и загрузчик, это займёт несколько минут.' : `Готово, сборка обновлена.${res.backups?.length ? ` Перед изменением сделал копии миров: ${res.backups.length}.` : ''}`) + linksText(res);
 
 function renderAnswer(r, p) {
@@ -2284,9 +2994,22 @@ function renderAnswer(r, p) {
     r.answers ||= Object.fromEntries(r.questions.map((q) => [q.id, (q.options.find((o) => o.selected) || q.options[0]).value]));
     // «в текущую сборку» — вопросы про версию, загрузчик и размер новой сборки не нужны (и наоборот)
     const shown = () => r.questions.filter((q) => !q.only || q.only === r.answers.where);
+    const options = (q) => {
+      if (q.id !== 'loader' || r.answers.version === 'auto' || !q.allowedByVersion?.[r.answers.version]) return q.options;
+      const allowed = q.allowedByVersion[r.answers.version];
+      return q.options.filter((o) => o.value === 'auto' || allowed.includes(o.value));
+    };
+    const normalizeLoader = () => {
+      const q = r.questions.find((x) => x.id === 'loader');
+      if (q && !options(q).some((o) => o.value === r.answers.loader)) r.answers.loader = 'auto';
+    };
     const html = () =>
       `<h3>Уточню пару вещей, чтобы сделать как надо</h3>${shown()
-        .map((q) => `<div class="clarify-q"><b>${esc(q.title)}</b>${q.hint ? `<small>${esc(q.hint)}</small>` : ''}<div class="segmented" role="group" aria-label="${esc(q.title)}">${q.options.map((o, i) => `<button type="button" data-cq="${esc(q.id)}" data-ci="${i}" aria-pressed="${r.answers[q.id] === o.value}">${esc(o.label)}</button>`).join('')}</div></div>`)
+        .map((q) => {
+          // «Другая версия» — список всех релизов; выбранное в нём снимает выделение с кнопок
+          const other = q.more?.length ? `<select class="input input-small" data-cmore="${esc(q.id)}" aria-label="Другая версия" ${r.sent ? 'disabled' : ''}><option value="">Другая версия…</option>${q.more.map((v) => `<option value="${esc(v)}" ${r.answers[q.id] === v ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select>` : '';
+          return `<div class="clarify-q"><b>${esc(q.title)}</b>${q.hint ? `<small>${esc(q.hint)}</small>` : ''}<div class="segmented" role="group" aria-label="${esc(q.title)}">${options(q).map((o) => `<button type="button" data-cq="${esc(q.id)}" data-ci="${q.options.indexOf(o)}" aria-pressed="${r.answers[q.id] === o.value}">${esc(o.label)}</button>`).join('')}</div>${other}</div>`;
+        })
         .join('')}<div class="actions"><button class="btn btn-primary btn-small" data-a="go" ${r.sent ? 'disabled' : ''}>${r.sent ? 'Ответы отправлены' : r.answers.where === 'current' ? 'Подобрать моды' : 'Подобрать'}</button></div>${by}`;
     const wire = (el) => {
       $$('[data-cq]', el).forEach(
@@ -2295,7 +3018,8 @@ function renderAnswer(r, p) {
             if (r.sent) return;
             const q = r.questions.find((x) => x.id === b.dataset.cq);
             r.answers[q.id] = q.options[Number(b.dataset.ci)].value;
-            if (q.id === 'where') {
+            if (q.id === 'where' || q.id === 'version') {
+              if (q.id === 'version') normalizeLoader();
               // другой набор вопросов: перерисовать этот ответ (и запомнить для перерисовки ленты)
               const entry = S.assistant.feed.find((m) => m.r === r);
               if (entry) entry.html = html();
@@ -2303,12 +3027,29 @@ function renderAnswer(r, p) {
               return wire(el);
             }
             $$(`[data-cq="${CSS.escape(q.id)}"]`, el).forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+            const sel = $(`[data-cmore="${CSS.escape(q.id)}"]`, el);
+            if (sel) sel.value = '';
+          }),
+      );
+      $$('[data-cmore]', el).forEach(
+        (s) =>
+          (s.onchange = () => {
+            if (r.sent || !s.value) return;
+            r.answers[s.dataset.cmore] = s.value;
+            if (s.dataset.cmore === 'version') {
+              normalizeLoader();
+              const entry = S.assistant.feed.find((m) => m.r === r);
+              if (entry) entry.html = html();
+              el.innerHTML = html();
+              return wire(el);
+            }
+            $$(`[data-cq="${CSS.escape(s.dataset.cmore)}"]`, el).forEach((x) => x.setAttribute('aria-pressed', 'false'));
           }),
       );
       $('[data-a="go"]', el).onclick = () => {
         if (r.sent) return;
         r.sent = true;
-        const sum = shown().map((q) => `${q.title}: ${q.options.find((o) => o.value === r.answers[q.id])?.label || ''}`).join(' · ');
+        const sum = shown().map((q) => `${q.title}: ${q.options.find((o) => o.value === r.answers[q.id])?.label || r.answers[q.id] || ''}`).join(' · ');
         ask(r.text, r.answers, sum);
       };
     };
@@ -2317,9 +3058,28 @@ function renderAnswer(r, p) {
   if (r.kind === 'build') {
     const b = r.build;
     const groups = r.groups.map((g) => `<p><b>${esc(g.title)}:</b> ${g.names.map(esc).join(', ')}</p>`).join('');
+    const concept = r.concept ? `<div class="notice"><strong>${esc(r.concept.title)}</strong>${esc(r.concept.summary)}<small>Код варианта: ${esc(r.concept.variantId)}</small></div>` : '';
     return push(
-      `<h3>Новая сборка «${esc(b.name)}»</h3><p>Minecraft ${esc(b.minecraft)} · ${esc(LOADERS[b.loader] || b.loader)} · ${b.mods} ${plural(b.mods, 'мод', 'мода', 'модов')}${b.deps ? ` и ${b.deps} ${plural(b.deps, 'библиотека', 'библиотеки', 'библиотек')} для них` : ''}. Версию и загрузчик выбрал те, под которые есть больше всего нужных модов.</p>${groups}${notFound}${dropped}${r.note ? `<div class="notice">${esc(r.note)}</div>` : ''}<p><b>Что сделаю:</b></p>${taskSteps(r.task)}<details class="more"><summary>Весь список с версиями</summary>${planHtml(r.plan)}</details>${taskBox('Создать и установить')}${by}`,
-      (el) => wireTask(el, r, 'Создать и установить', doneText),
+      `<h3>Новая сборка «${esc(b.name)}»</h3>${concept}<p>Minecraft ${esc(b.minecraft)} · ${esc(LOADERS[b.loader] || b.loader)} · ${b.mods} ${plural(b.mods, 'мод', 'мода', 'модов')}${b.deps ? ` и ${b.deps} ${plural(b.deps, 'библиотека', 'библиотеки', 'библиотек')} для них` : ''}. Версию и загрузчик выбрал те, под которые есть больше всего нужных модов.</p>${groups}${notFound}${dropped}${r.note ? `<div class="notice">${esc(r.note)}</div>` : ''}<p><b>Что сделаю:</b></p>${taskSteps(r.task)}<details class="more"><summary>Весь список с версиями</summary>${planHtml(r.plan)}</details>${taskBox('Создать и установить', '<button class="btn btn-ghost btn-small" data-a="reroll">Другой вариант</button>')}${by}`,
+      (el) => {
+        wireTask(el, r, 'Создать и установить', doneText);
+        const again = $('[data-a="reroll"]', el);
+        if (again)
+          again.onclick = async () => {
+            again.disabled = true;
+            again.textContent = 'Подбираю…';
+            try {
+              const next = await call('ai:reroll', r.task.id);
+              const at = S.assistant.feed.findIndex((m) => m.r === r);
+              if (at >= 0) S.assistant.feed.splice(at, 1);
+              renderAnswer(next, p);
+            } catch (e) {
+              again.disabled = false;
+              again.textContent = 'Другой вариант';
+              toast(e.message);
+            }
+          };
+      },
     );
   }
   if (r.kind === 'plan') {
@@ -2373,13 +3133,18 @@ $$('[data-window]').forEach((b) => (b.onclick = () => call('win:' + b.dataset.wi
 // ---------- старт ----------
 (async () => {
   hydrate();
+  Live.init({ canvas: $('#live-canvas'), videos: $$('.live-video') });
   try {
     S.sys = await call('sys:info');
     S.auth = await call('auth:status');
     await call('profiles:first');
     await refresh();
+    S.memories = await call('memories:status').catch(() => null);
+    // ролики нужны главной сразу (кнопка «Фильм» у сессий) — ждём их до первой отрисовки
+    await loadClips();
     animateEnter();
     render();
+    refreshVoice(); // окно открыли во время уже идущей сессии
   } catch (e) {
     $('#main').innerHTML = `<div class="page"><div class="notice error"><strong>Не удалось загрузить данные лаунчера</strong>${esc(e.message)}</div><div class="actions"><button class="btn btn-primary" id="boot-retry">Повторить</button><button class="btn btn-ghost" id="boot-logs">Журнал лаунчера</button></div></div>`;
     $('#boot-retry').onclick = () => location.reload();

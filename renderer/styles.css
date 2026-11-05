@@ -31,6 +31,10 @@
 :root[data-theme="light"] { color-scheme: light; --bg: #eceee8; --panel: #ffffff; --panel-2: #f3f4ef; --panel-3: #e5e8de; --side: #e2e6da; --input: #ffffff; --dialog: #ffffff; --text: #1c2119; --text-2: #343b30; --muted: #4d5648; --faint: #6a7364; --line: #0000001a; --line-strong: #0000002e; --warn-bg: #f6edc8; --danger-bg: #f8d9d2; --danger: #a33a2a; }
 :root[data-theme="light"] .notice.error { color: #6b1d10; }
 :root[data-theme="light"] .tag { background: #0000000d; }
+/* правило выше сильнее .tag.warn/.tag.red — без своих цветов их бледный текст терялся на белом */
+:root[data-theme="light"] .tag.warn { background: #f6e7b4; color: #5c4400; }
+:root[data-theme="light"] .tag.red { background: #f8d9d2; color: #8a2a1a; }
+:root[data-theme="light"] .tag.green { background: color-mix(in srgb, var(--accent) 22%, #fff); color: color-mix(in srgb, var(--accent) 35%, #1c2119); }
 /* «шрифт» интерфейса и скругления */
 :root[data-radius="sharp"] { --radius: 4px; }
 :root[data-radius="round"] { --radius: 16px; }
@@ -40,6 +44,12 @@
 :root[data-font="minecraft"] body { font-family: 'Consolas', 'Lucida Console', monospace; letter-spacing: .1px; }
 :root[data-font="rounded"] body { font-family: 'Segoe UI Variable Display', 'Nunito', 'Trebuchet MS', system-ui, sans-serif; }
 * { box-sizing: border-box; }
+/* полосы прокрутки в цветах темы: стандартные серые полосы Windows со стрелками выбивались из оформления */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-button { display: none; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 10px; border: 3px solid transparent; background-clip: padding-box; min-height: 32px; }
+::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--text) 35%, transparent); }
 html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 'Segoe UI', system-ui, Arial, sans-serif; -webkit-font-smoothing: antialiased; overflow: hidden; }
 button, input, select, textarea { font: inherit; color: inherit; }
@@ -64,7 +74,9 @@ code { font: 13px Consolas, monospace; background: #0003; padding: 1px 5px; bord
 .window-buttons button:last-child:hover { background: #a3473a; color: #fff; }
 .window-buttons .icon { width: 13px; height: 13px; }
 
-.sidebar { background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 14px 10px; gap: 2px; min-height: 0; }
+.sidebar { background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 14px 10px; gap: 2px; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+.sidebar::-webkit-scrollbar { width: 6px; }
+.sidebar::-webkit-scrollbar-thumb { border-width: 1px; }
 .brand { display: flex; align-items: center; gap: 10px; font-size: 19px; padding: 6px 10px 18px; letter-spacing: -.4px; }
 .brand .icon { width: 28px; height: 28px; }
 .brand b { font-weight: 600; }
@@ -297,6 +309,8 @@ details.more > summary:hover { color: var(--text); }
 .mod-row .mod-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
 .target-bar { display: flex; align-items: center; gap: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; flex-wrap: wrap; }
 .target-bar select.input { width: auto; min-width: 240px; }
+.build-group + .build-group { margin-top: 30px; }
+.popover-label { padding: 9px 12px 4px; color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .project-head { display: flex; gap: 16px; align-items: center; margin: 6px 0 16px; }
 .project-head img, .project-head .mod-icon { width: 72px; height: 72px; border-radius: 12px; background: var(--panel-3); display: grid; place-items: center; }
 .project-head h1 { font-size: 24px; }
@@ -492,7 +506,7 @@ input[type=number]::-webkit-inner-spin-button { opacity: .6; }
 :root[data-motion="off"] .blob, :root[data-motion="reduced"] .blob { animation: none; }
 
 /* --- общая «стеклянная» основа для glass / aurora / neon / sunset --- */
-:root[data-style="glass"], :root[data-style="aurora"], :root[data-style="neon"], :root[data-style="sunset"] {
+:root[data-style="glass"], :root[data-style="aurora"], :root[data-style="neon"], :root[data-style="sunset"], :root[data-style="lush"], :root[data-style="campfire"], :root[data-style="deepdark"], :root[data-style="meadow"] {
   /* стекло = оттенок (--tint) × плотность (--pa, задаёт цветовая схема) × множитель (--k, задаёт «Стекло») */
   --tint: 255, 255, 255;
   --pa: .065;
@@ -517,20 +531,20 @@ input[type=number]::-webkit-inner-spin-button { opacity: .6; }
 :root[data-blur="soft"] { --gloss: none; --input: rgba(0, 0, 0, .12); }
 :root[data-blur="strong"]:not([data-theme="light"]) { --input: rgba(0, 0, 0, .45); --gloss: linear-gradient(155deg, rgba(255, 255, 255, .22) 0%, rgba(255, 255, 255, .08) 40%, rgba(255, 255, 255, .03) 100%); }
 :root[data-blur="strong"] :is(.panel, .card, .dialog, .target-bar) { outline: 1px solid rgba(255, 255, 255, .14); outline-offset: -1px; }
-:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"]) :is(.sidebar, .titlebar, .assistant-panel) { backdrop-filter: blur(var(--blur)) saturate(160%); }
-:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"]) :is(.panel, .card, .target-bar, .dialog, .popover, .empty, .launch-state, .build-picker, .mini-world, .toast, .session-banner, .detail-cover, .project-body, .hcard, .quick-btn) {
+:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"], [data-style="lush"], [data-style="campfire"], [data-style="deepdark"], [data-style="meadow"]) :is(.sidebar, .titlebar, .assistant-panel) { backdrop-filter: blur(var(--blur)) saturate(160%); }
+:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"], [data-style="lush"], [data-style="campfire"], [data-style="deepdark"], [data-style="meadow"]) :is(.panel, .card, .target-bar, .dialog, .popover, .empty, .launch-state, .build-picker, .mini-world, .toast, .session-banner, .detail-cover, .project-body, .hcard, .quick-btn) {
   backdrop-filter: blur(var(--blur)) saturate(170%);
   background-image: var(--gloss);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .2), inset 0 -1px 0 rgba(255, 255, 255, .04), 0 10px 32px rgba(0, 0, 0, .22);
 }
-:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"]) .mod-row { background-color: rgba(255, 255, 255, .05); background-image: var(--gloss); }
-:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"]) .home-bg.default { background: transparent; }
-:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"]) .home-bg.default::after { background: linear-gradient(0deg, rgba(0, 0, 0, .35) 0%, transparent 50%); }
+:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"], [data-style="lush"], [data-style="campfire"], [data-style="deepdark"], [data-style="meadow"]) .mod-row { background-color: rgba(255, 255, 255, .05); background-image: var(--gloss); }
+:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"], [data-style="lush"], [data-style="campfire"], [data-style="deepdark"], [data-style="meadow"], [data-style="lush"], [data-style="campfire"], [data-style="deepdark"]) .home-bg.default { background: transparent; }
+:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"], [data-style="lush"], [data-style="campfire"], [data-style="deepdark"], [data-style="meadow"], [data-style="lush"], [data-style="campfire"], [data-style="deepdark"]) .home-bg.default::after { background: linear-gradient(0deg, rgba(0, 0, 0, .35) 0%, transparent 50%); }
 /* глянцевые кнопки */
 :root:is([data-style="glass"], [data-style="aurora"], [data-style="sunset"]) .btn-primary { background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 70%, white) 0%, var(--accent) 55%, color-mix(in srgb, var(--accent) 85%, black) 100%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .55), 0 6px 20px color-mix(in srgb, var(--accent) 35%, transparent); }
-:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"]) .btn-secondary { background: rgba(255, 255, 255, .1); backdrop-filter: blur(12px); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .18); }
-:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"]) .nav-item.active { background: rgba(255, 255, 255, .12); box-shadow: inset 3px 0 0 var(--accent), inset 0 1px 0 rgba(255, 255, 255, .15); }
-:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"]) .overlay { background: rgba(0, 0, 0, .35); backdrop-filter: blur(4px); }
+:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"], [data-style="lush"], [data-style="campfire"], [data-style="deepdark"], [data-style="meadow"]) .btn-secondary { background: rgba(255, 255, 255, .1); backdrop-filter: blur(12px); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .18); }
+:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"], [data-style="lush"], [data-style="campfire"], [data-style="deepdark"], [data-style="meadow"]) .nav-item.active { background: rgba(255, 255, 255, .12); box-shadow: inset 3px 0 0 var(--accent), inset 0 1px 0 rgba(255, 255, 255, .15); }
+:root:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"], [data-style="lush"], [data-style="campfire"], [data-style="deepdark"], [data-style="meadow"]) .overlay { background: rgba(0, 0, 0, .35); backdrop-filter: blur(4px); }
 
 /* --- жидкое стекло --- */
 :root[data-style="glass"] { --bg: #0a0e17; --c1: var(--accent); --c2: #5b7cff; --c3: #b35cff; --c4: #23c4c0; --blob-o: .6; }
@@ -609,15 +623,22 @@ input[type=number]::-webkit-inner-spin-button { opacity: .6; }
 .pv-minimal::before, .pv-minimal::after { background: #2e342c !important; border: none !important; }
 
 /* светлая схема + живой фон без картинки: главный экран — тёмный текст на светлом стекле */
-:root[data-theme="light"]:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"]) .home:has(.home-bg.default) {
+:root[data-theme="light"]:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"], [data-style="meadow"], [data-style="lush"], [data-style="campfire"], [data-style="deepdark"]) .home:has(.home-bg.default) {
   color: var(--text);
 }
-:root[data-theme="light"]:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"]) .home:has(.home-bg.default) :is(.build-picker, .launch-state, .mini-world, .home-meta .tag, .bg-label, .hcard, .quick-btn) {
+:root[data-theme="light"]:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"], [data-style="meadow"], [data-style="lush"], [data-style="campfire"], [data-style="deepdark"]) .home:has(.home-bg.default) :is(.build-picker, .launch-state, .mini-world, .home-meta .tag, .bg-label, .hcard, .quick-btn) {
   background-color: rgba(255, 255, 255, .6); color: var(--text); border-color: rgba(0, 0, 0, .08);
 }
-:root[data-theme="light"]:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"]) .home:has(.home-bg.default) :is(h1, .first-run, .home-worlds h2, .hcard h2, .sec-head h2) { color: var(--text); text-shadow: none; }
-:root[data-theme="light"]:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"]) .home:has(.home-bg.default) :is(.build-picker small, .mini-world small, .launch-state .sub) { color: var(--muted); }
-:root[data-theme="light"]:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"]) .home-bg.default::after { background: none; }
+:root[data-theme="light"]:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"], [data-style="meadow"], [data-style="lush"], [data-style="campfire"], [data-style="deepdark"]) .home:has(.home-bg.default) :is(h1, .first-run, .home-worlds h2, .hcard h2, .sec-head h2) { color: var(--text); text-shadow: none; }
+:root[data-theme="light"]:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"], [data-style="meadow"], [data-style="lush"], [data-style="campfire"], [data-style="deepdark"]) .home:has(.home-bg.default) :is(.build-picker small, .mini-world small, .launch-state .sub) { color: var(--muted); }
+:root[data-theme="light"]:is([data-style="glass"], [data-style="aurora"], [data-style="neon"], [data-style="sunset"], [data-style="meadow"], [data-style="lush"], [data-style="campfire"], [data-style="deepdark"]) .home-bg.default::after { background: none; }
+/* «Минимализм» в светлой схеме: однотонный светлый главный экран вместо тёмного градиента под тёмным текстом */
+:root[data-theme="light"][data-style="minimal"] .home-bg.default { background: var(--bg); }
+:root[data-theme="light"]:is([data-style="minimal"], [data-style="pixel"]) .home-bg.default::after { background: none; }
+:root[data-theme="light"]:is([data-style="minimal"], [data-style="pixel"]) .home:has(.home-bg.default) { color: var(--text); }
+:root[data-theme="light"]:is([data-style="minimal"], [data-style="pixel"]) .home:has(.home-bg.default) :is(h1, .first-run, .home-worlds h2, .hcard h2, .sec-head h2) { color: var(--text); text-shadow: none; }
+:root[data-theme="light"]:is([data-style="minimal"], [data-style="pixel"]) .home:has(.home-bg.default) :is(.build-picker, .launch-state, .mini-world, .home-meta .tag, .bg-label, .hcard, .quick-btn) { background-color: var(--panel); color: var(--text); border-color: var(--line-strong); }
+:root[data-theme="light"]:is([data-style="minimal"], [data-style="pixel"]) .home:has(.home-bg.default) :is(.build-picker small, .mini-world small, .launch-state .sub) { color: var(--muted); }
 :root[data-style="pixel"] .play-button.btn-primary::before { display: none; }
 
 
@@ -679,3 +700,11 @@ select.input { color-scheme: dark; }
 .clarify-q small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .clarify-q .segmented { margin-top: 6px; }
 .clarify-q .segmented button { padding: 5px 10px; font-size: 13px; }
+.clarify-q select { display: block; margin-top: 6px; width: auto; min-width: 170px; }
+
+/* админ-панель сервера хозяина */
+.admin-stats { margin-top: 4px; }
+.admin-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.admin-grid > :first-child { grid-column: auto; }
+.people li select.input-small { width: auto; height: 30px; padding: 0 8px; font-size: 12.5px; }
+.people li { flex-wrap: wrap; }
